@@ -17,6 +17,9 @@ pub fn build(b: *std.Build) void {
     });
     utf8_mod.addOptions("build", options);
 
+    // Benchmarks
+    bench(b, target, optimize, utf8_mod);
+
     // Examples
     const example_encode_mod = b.createModule(.{
         .root_source_file = b.path("examples/encoding.zig"),
@@ -52,4 +55,35 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_example_encode.step);
     test_step.dependOn(&run_example_decode.step);
+}
+
+fn bench(
+    b: *std.Build,
+    target: std.Build.ResolvedTarget,
+    optimize: std.builtin.Mode,
+    utf8_mod: *std.Build.Module,
+) void {
+    const bench_decode_random_mod = b.createModule(.{
+        .root_source_file = b.path("benchmarks/decode_random.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_decode_random_mod.addImport("utf8", utf8_mod);
+    const bench_decode_random_exe = b.addExecutable(.{
+        .name = "bench_decode_random",
+        .root_module = bench_decode_random_mod,
+    });
+    b.installArtifact(bench_decode_random_exe);
+
+    const bench_texts_mod = b.createModule(.{
+        .root_source_file = b.path("benchmarks/texts.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    bench_texts_mod.addImport("utf8", utf8_mod);
+    const bench_texts_exe = b.addExecutable(.{
+        .name = "bench_texts",
+        .root_module = bench_texts_mod,
+    });
+    b.installArtifact(bench_texts_exe);
 }
