@@ -5,29 +5,29 @@ pub fn main() !void {
 
         var decoder: utf8.Decoder = .init(string);
 
-        assert(decoder.remainingLenght() == 5);
+        assert(decoder.remainingLength() == 5);
         assert(decoder.next().? == 'こ');
 
-        assert(decoder.remainingLenght() == 4);
+        assert(decoder.remainingLength() == 4);
         assert(decoder.next().? == 'ん');
 
-        assert(decoder.remainingLenght() == 3);
+        assert(decoder.remainingLength() == 3);
         assert(decoder.next().? == 'に');
 
-        assert(decoder.remainingLenght() == 2);
+        assert(decoder.remainingLength() == 2);
         assert(decoder.next().? == 'ち');
 
-        assert(decoder.remainingLenght() == 1);
+        assert(decoder.remainingLength() == 1);
         assert(decoder.next().? == 'は');
 
-        assert(decoder.remainingLenght() == 0);
+        assert(decoder.remainingLength() == 0);
         assert(decoder.next() == null);
     }
     {
         const gpa = std.heap.smp_allocator;
         var decoder: utf8.Decoder = .init("Hi!⚡");
 
-        const length = decoder.remainingLenght();
+        const length = decoder.remainingLength();
 
         const codepoints = try decoder.decodeRemaining(gpa);
         defer gpa.free(codepoints);

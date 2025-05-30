@@ -15,7 +15,7 @@ pub fn init(source: []const u8) Decoder {
     return .{ .source = source };
 }
 
-pub fn remainingLenght(self: *const Decoder) usize {
+pub fn remainingLength(self: *const Decoder) usize {
     var len: usize = 0;
     for (self.source[self.curr..]) |byte| {
         // If not a continuation, we have a new codepoint
