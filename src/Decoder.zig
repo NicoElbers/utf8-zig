@@ -1,8 +1,9 @@
 //! UTF8 decoder
 //!
-//! Maps all invalid characters, to `0xFFFD`
-//!
 //! This implementation works on slices until the zig IO rewrite happens.
+//!
+//! This implementation has 1 known bug wrt handling replacement of invalid
+//! characters. Read the source for info.
 
 source: []const u8,
 curr: usize = 0,
@@ -15,357 +16,286 @@ pub fn init(source: []const u8) Decoder {
     return .{ .source = source };
 }
 
-pub fn remainingLength(self: *const Decoder) usize {
-    var len: usize = 0;
-    for (self.source[self.curr..]) |byte| {
-        // If not a continuation, we have a new codepoint
-        if ((byte & 0xC0) != 0x80)
-            len += 1;
-    }
-    return len;
-}
-
-pub fn decodeRemaining(self: *Decoder, gpa: Allocator) Allocator.Error![]const CodePoint {
-    defer self.* = .empty;
-
-    // Allocate everything at once
-    var sink: ArrayListUnmanaged(u21) = try .initCapacity(gpa, self.source.len);
-    errdefer sink.deinit(gpa);
-
-    var source = self.source[self.curr..];
-    while (source.len >= 4) {
-        @branchHint(.likely);
-        const bytes: *const [4]u8 = source[0..4];
-        const point: CodePoint, const len = decodeBytes(bytes);
-
-        source = source[len.toLen()..];
-
-        sink.appendAssumeCapacity(point);
-    }
-
-    assert(source.len < 4);
-
-    while (source.len > 0) {
-        var bytes: [4]u8 = undefined;
-        @memcpy(bytes[0..source.len], source);
-
-        const point: CodePoint, const len = decodeBytes(&bytes);
-
-        if (source.len < len.toLen()) {
-            // Incomplete character
-            sink.appendAssumeCapacity(invalid_codepoint);
-            break;
-        }
-
-        source = source[len.toLen()..];
-
-        sink.appendAssumeCapacity(point);
-    }
-
-    // Remap once here, worst case this is allocation 2 and we have to memcpy
-    return sink.toOwnedSlice(gpa);
-}
-
-test decodeRemaining {
-    const gpa = std.testing.allocator;
-
-    const in = "hi🙂!\xFF!";
-    const out: []const u21 = &.{ 'i', '🙂', '!', invalid_codepoint, '!' };
-    var utf8: Decoder = .init(in);
-
-    _ = utf8.next();
-
-    const found = try utf8.decodeRemaining(gpa);
-    defer gpa.free(found);
-
-    try std.testing.expectEqualSlices(u21, out, found);
-}
+pub const Error = error{ IncompleteCodePoint, InvalidCodePoint };
 
 pub fn next(self: *Decoder) ?CodePoint {
-    if (self.curr >= self.source.len) return null;
+    return self.nextStrict() catch invalid_codepoint;
+}
 
-    const remaining = self.source[self.curr..];
-    if (remaining.len >= 4) {
-        @branchHint(.likely);
-
-        const bytes: *const [4]u8 = remaining[0..4];
-        const point, const len = decodeBytes(bytes);
-        self.curr += len.toLen();
-        return point;
-    } else {
-        var bytes: [4]u8 = undefined;
-        @memcpy(bytes[0..remaining.len], remaining);
-        const point, const len = decodeBytes(&bytes);
-        self.curr += len.toLen();
-
-        if (remaining.len < len.toLen()) {
-            @branchHint(.unlikely);
-
-            return invalid_codepoint;
-        }
-
-        return point;
+pub fn nextIgnore(self: *Decoder) ?CodePoint {
+    while (true) {
+        return self.nextStrict() catch continue;
     }
 }
 
-test next {
+pub fn nextStrict(self: *Decoder) Error!?CodePoint {
+    if (self.curr >= self.source.len) return null;
+    const remaining = self.source[self.curr..];
+
+    const len: CodePointLen = .parse(remaining[0]);
+
+    if (!len.isValid()) {
+        @branchHint(.unlikely);
+        self.curr += 1;
+        return error.InvalidCodePoint;
+    }
+
+    // BUG: This is incorrect. If we have a broken surrogate this should turn
+    // into a single invalid character.
+    // Test case:
+    //   &.{ 0b1111_0000, 0b1001_0000, 0b1000_0000 }
+    // Should ouput (verified through python and rust)
+    //   &.{ error }
+    // Outputs
+    //   &.{ error, error, error }
+    // This will be much easier to fix once I integrate this with a reader, and
+    // I only want to do that once we have good buffered readers (IO rewrite).
+    if (remaining.len < len.toLen()) {
+        @branchHint(.unlikely);
+        self.curr += 1;
+        return error.IncompleteCodePoint;
+    }
+
+    return switch (len) {
+        .@"1" => blk: {
+            self.curr += 1;
+            break :blk remaining[0];
+        },
+        .@"2" => blk: {
+            const bytes = remaining[0..2];
+
+            if (bytes[0] < 0b1100_0010 or // Non cannonical
+                bytes[1] & 0b1100_0000 != 0b1000_0000) // continuation
+            {
+                @branchHint(.unlikely);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
+            var codepoint: CodePoint = bytes[0] & 0b0001_1111;
+            codepoint <<= 6;
+            codepoint |= bytes[1] & 0b0011_1111;
+
+            self.curr += 2;
+            break :blk codepoint;
+        },
+        .@"3" => blk: {
+            const bytes = remaining[0..3];
+
+            // Surrogate
+            if ((bytes[0] == 0b1110_0000 and bytes[1] < 0b1010_0000) or
+                (bytes[0] == 0b1110_1101 and bytes[1] > 0b10011111))
+            {
+                @branchHint(.unlikely);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
+            // Continuations
+            if (bytes[1] & 0b1100_0000 != 0b1000_0000) {
+                @branchHint(.unlikely);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
+            if (bytes[2] & 0b1100_0000 != 0b1000_0000) {
+                @branchHint(.unlikely);
+                self.curr += 2;
+                return error.InvalidCodePoint;
+            }
+
+            var codepoint: CodePoint = bytes[0] & 0b0000_1111;
+            codepoint <<= 6;
+            codepoint |= bytes[1] & 0b0011_1111;
+            codepoint <<= 6;
+            codepoint |= bytes[2] & 0b0011_1111;
+
+            self.curr += 3;
+            break :blk codepoint;
+        },
+        .@"4" => blk: {
+            const bytes = remaining[0..4];
+
+            // Range
+            if (bytes[0] > 0b1111_0100) {
+                @branchHint(.unlikely);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
+            // Surrogate
+            if ((bytes[0] == 0b1111_0000 and bytes[1] < 0b1001_0000) or
+                (bytes[0] == 0b1111_0100 and bytes[1] > 0b1000_1111))
+            {
+                @branchHint(.unlikely);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
+            // Continuations
+            if (bytes[1] & 0b1100_0000 != 0b1000_0000) // Cont
+            {
+                @branchHint(.unlikely);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
+            if (bytes[2] & 0b1100_0000 != 0b1000_0000) {
+                @branchHint(.unlikely);
+                self.curr += 2;
+                return error.InvalidCodePoint;
+            }
+
+            if (bytes[3] & 0b1100_0000 != 0b1000_0000) {
+                @branchHint(.unlikely);
+                self.curr += 3;
+                return error.InvalidCodePoint;
+            }
+
+            var codepoint: CodePoint = bytes[0] & 0b0000_0111;
+            codepoint <<= 6;
+            codepoint |= bytes[1] & 0b0011_1111;
+            codepoint <<= 6;
+            codepoint |= bytes[2] & 0b0011_1111;
+            codepoint <<= 6;
+            codepoint |= bytes[3] & 0b0011_1111;
+
+            self.curr += 4;
+            break :blk codepoint;
+        },
+        else => unreachable,
+    };
+}
+
+test nextStrict {
+    const expectEqual = std.testing.expectEqual;
+    const expectError = std.testing.expectError;
+
     const in = "hi🙂!\xFF!";
     var utf8: Decoder = .init(in);
 
-    try std.testing.expectEqual('h', utf8.next());
-    try std.testing.expectEqual('i', utf8.next());
-    try std.testing.expectEqual('🙂', utf8.next());
-    try std.testing.expectEqual('!', utf8.next());
-    try std.testing.expectEqual(invalid_codepoint, utf8.next());
-    try std.testing.expectEqual('!', utf8.next());
-    try std.testing.expectEqual(null, utf8.next());
+    try expectEqual('h', utf8.nextStrict());
+    try expectEqual('i', utf8.nextStrict());
+    try expectEqual('🙂', utf8.nextStrict());
+    try expectEqual('!', utf8.nextStrict());
+    try expectError(error.InvalidCodePoint, utf8.nextStrict());
+    try expectEqual('!', utf8.nextStrict());
+    try expectEqual(null, utf8.nextStrict());
+    try expectEqual(null, utf8.nextStrict());
 }
 
-/// Internal implementation function
-///
-/// Decodes 4 bytes into a valid codepoint.
-///
-/// Decodes invalid codepoints into 0xFFFD.
-///
-/// Based on https://encoding.spec.whatwg.org/#utf-8-decoder
-fn decodeBytes(bytes: *const [4]u8) struct { CodePoint, CodePointLen } {
-    var codepoint: CodePoint = 0;
-    var lower_bound: CodePoint = 0x80;
-    var upper_bound: CodePoint = 0xBF;
-
-    const length: CodePointLen = switch (bytes[0]) {
-        0x00...0x7F => return .{ bytes[0], .@"1" },
-        0xC2...0xDF => blk: {
-            codepoint = bytes[0] & 0x1F;
-            break :blk .@"2";
-        },
-        0xE0...0xEF => blk: {
-            if (bytes[0] == 0xE0)
-                lower_bound = 0xA0;
-
-            if (bytes[0] == 0xED)
-                upper_bound = 0x9F;
-
-            codepoint = bytes[0] & 0xF;
-            break :blk .@"3";
-        },
-        0xF0...0xF4 => blk: {
-            if (bytes[0] == 0xF0)
-                lower_bound = 0x90;
-
-            if (bytes[0] == 0xF4)
-                upper_bound = 0x8F;
-
-            codepoint = bytes[0] & 0x7;
-
-            break :blk .@"4";
-        },
-        else => return .{ invalid_codepoint, .@"1" },
-    };
-
-    for (1..length.toLen()) |index| {
-        const byte = bytes[index];
-
-        if (byte < lower_bound or byte > upper_bound)
-            return .{ invalid_codepoint, .from(@intCast(index)) };
-
-        lower_bound = 0x80;
-        upper_bound = 0xBF;
-
-        codepoint <<= 6;
-        codepoint |= byte & 0x3F;
-    }
-
-    return .{ codepoint, length };
-}
-
-test decodeBytes {
-    // Test reasoning from bitwise logic
-
-    const expectEqual = std.testing.expectEqual;
-    const bot_mask: u8 = 0b0011_1111;
-
-    // Len == 1
-    for (0b0000_0000..0b0111_1111 + 1) |byte| {
-        const bytes: [4]u8 = .{ @intCast(byte), undefined, undefined, undefined };
-        const expect: CodePoint = @intCast(byte);
-
-        const point, const len = decodeBytes(&bytes);
-
-        try expectEqual(CodePointLen.@"1", len);
-        try expectEqual(expect, point);
-    }
-
-    // Len == 2
-    for (0b1000_0000..0b1011_1111 + 1) |byte| {
-        const bytes: [4]u8 = .{ 0b1101_0101, @intCast(byte), undefined, undefined };
-        const expect: CodePoint = 0 |
-            (0b1_0101 << 6) |
-            @as(CodePoint, @as(u6, @intCast(byte & bot_mask)));
-
-        const point, const len = decodeBytes(&bytes);
-
-        try expectEqual(CodePointLen.@"2", len);
-        try expectEqual(expect, point);
-    }
-
-    // Len == 3
-    for (0b1000_0000..0b1011_1111 + 1) |byte| {
-        const bytes: [4]u8 = .{ 0b1110_1010, 0b1010_1011, @intCast(byte), undefined };
-        const expect: CodePoint = 0 |
-            (0b1010 << 12) |
-            (0b10_1011 << 6) |
-            @as(CodePoint, @as(u6, @intCast(byte & bot_mask)));
-
-        const point, const len = decodeBytes(&bytes);
-
-        try expectEqual(CodePointLen.@"3", len);
-        try expectEqual(expect, point);
-    }
-
-    // Len == 4
-    for (0b1000_0000..0b1011_1111 + 1) |byte| {
-        const bytes: [4]u8 = .{ 0b1111_0001, 0b1001_0101, 0b1001_0101, @intCast(byte) };
-        const expect: CodePoint = 0 |
-            (0b0000_0001 << 18) |
-            (0b0101_0101 << 12) |
-            (0b0101_0101 << 6) |
-            @as(CodePoint, @as(u6, @intCast(byte & bot_mask)));
-
-        const point, const len = decodeBytes(&bytes);
-
-        try expectEqual(CodePointLen.@"4", len);
-        try expectEqual(expect, point);
-    }
-}
-
-test "Invalid mappings" {
+test "Sanity" {
     const tst = struct {
-        pub fn tst(expect: []const u21, input: []const u8) !void {
-            var utf8: Decoder = .init(input);
-
-            for (expect) |point| {
-                const found = utf8.next();
-                try std.testing.expectEqual(point, found);
-            }
-            try std.testing.expectEqual(null, utf8.next());
+        pub fn tst(in: []const u8, out: []const u21) !void {
+            var decoder: Decoder = .init(in);
+            for (out) |point|
+                try std.testing.expectEqual(point, decoder.nextStrict());
         }
     }.tst;
 
-    try tst(&.{}, "");
-    try tst(&.{ 'f', 'o', 'o' }, "foo");
-    try tst(&.{'𐐷'}, "𐐷");
+    {
+        const in = "A";
+        const out: []const u21 = &.{'A'};
 
-    // Table 3-8. U+FFFD for Non-Shortest Form Sequences
-    try tst(&.{ '�', '�', '�', '�', '�', '�', '�', '�', 'A' }, "\xC0\xAF\xE0\x80\xBF\xF0\x81\x82A");
+        try tst(in, out);
+    }
+    {
+        const in = "Ƣ";
+        const out: []const u21 = &.{'Ƣ'};
 
-    // Table 3-9. U+FFFD for Ill-Formed Sequences for Surrogates
-    try tst(&.{ '�', '�', '�', '�', '�', '�', '�', '�', 'A' }, "\xED\xA0\x80\xED\xBF\xBF\xED\xAFA");
+        try tst(in, out);
+    }
+    {
+        const in = "ࡡ";
+        const out: []const u21 = &.{'ࡡ'};
 
-    // Table 3-10. U+FFFD for Other Ill-Formed Sequences
-    try tst(&.{ '�', '�', '�', '�', '�', 'A', '�', '�', 'B' }, "\xF4\x91\x92\x93\xFFA\x80\xBFB");
+        try tst(in, out);
+    }
+    {
+        const in = "᳄";
+        const out: []const u21 = &.{'᳄'};
 
-    // Table 3-11. U+FFFD for Truncated Sequences
-    try tst(&.{ '�', '�', '�', '�', 'A' }, "\xE1\x80\xE2\xF0\x91\x92\xF1\xBFA");
-}
+        try tst(in, out);
+    }
+    {
+        const in = "𐃍";
+        const out: []const u21 = &.{'𐃍'};
 
-test "decodeBytes sanity" {
-    {
-        const in = "a";
-        const buf: *const [4]u8 = in ++ ("\x00" ** 3);
-        const point, _ = decodeBytes(buf);
-        try std.testing.expectEqual('a', point);
+        try tst(in, out);
     }
     {
-        const in = "×";
-        const buf: *const [4]u8 = in ++ ("\x00" ** 2);
-        const point, _ = decodeBytes(buf);
-        try std.testing.expectEqual('×', point);
-    }
-    {
-        const in = "з";
-        const buf: *const [4]u8 = in ++ ("\x00" ** 2);
-        const point, _ = decodeBytes(buf);
-        try std.testing.expectEqual('з', point);
-    }
-    {
-        const in = "€";
-        const buf: *const [4]u8 = in ++ ("\x00" ** 1);
-        const point, _ = decodeBytes(buf);
-        try std.testing.expectEqual('€', point);
-    }
-    {
-        const in = "⚡";
-        const buf: *const [4]u8 = in ++ ("\x00" ** 1);
-        const point, _ = decodeBytes(buf);
-        try std.testing.expectEqual('⚡', point);
-    }
-    {
-        const in = "ㄊ";
-        const buf: *const [4]u8 = in ++ ("\x00" ** 1);
-        const point, _ = decodeBytes(buf);
-        try std.testing.expectEqual('ㄊ', point);
-    }
-    {
-        const in = "𝆑";
-        const buf: *const [4]u8 = in;
-        const point, _ = decodeBytes(buf);
-        try std.testing.expectEqual('𝆑', point);
-    }
-    {
-        const in = "🂪";
-        const buf: *const [4]u8 = in;
-        const point, _ = decodeBytes(buf);
-        try std.testing.expectEqual('🂪', point);
+        const in = "こんにちは";
+        const out: []const u21 = &.{ 'こ', 'ん', 'に', 'ち', 'は' };
+
+        try tst(in, out);
     }
 }
 
-test "decodeBytes exhaustive valid" {
-    // All valid UTF8 characters
-    for (0..0x110000) |i| {
-        const codepoint: u21 = @intCast(i);
-
-        var bytes: [4]u8 = undefined;
-        const encoder_len = std.unicode.utf8Encode(codepoint, &bytes) catch |err| switch (err) {
-            error.Utf8CannotEncodeSurrogateHalf => continue, // Tested later
+test "All valid codepoints" {
+    var buf: [4]u8 = undefined;
+    for (0..0x10ffff + 1) |point| {
+        const cp: CodePoint = @intCast(point);
+        const len = std.unicode.utf8Encode(cp, &buf) catch |err| switch (err) {
+            error.Utf8CannotEncodeSurrogateHalf => continue,
             error.CodepointTooLarge => unreachable,
         };
+        var decoder: Decoder = .init(buf[0..len]);
 
-        const point, const len = decodeBytes(&bytes);
-
-        try std.testing.expectEqual(encoder_len, len.toLen());
-        try std.testing.expectEqual(codepoint, point);
+        try std.testing.expectEqual(cp, decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
     }
 }
 
-test "decodeBytes surrogates" {
-    for (0xD800..0xDFFF) |i| {
-        const codepoint: u21 = @intCast(i);
-        var bytes: [4]u8 = undefined;
-        _ = std.unicode.wtf8Encode(codepoint, &bytes) catch unreachable;
+test "Invalid characters" {
+    const cont: u8 = 0b1000_0000;
+    _ = &cont;
 
-        const val, const len = decodeBytes(&bytes);
+    const sequences = [_][]const u8{
+        // Simple
+        &.{0b1100_0010}, // 2 char wo continuations
+        &.{0b1110_0000}, // 3 char wo continuations
+        &.{0b1111_0000}, // 4 char wo continuations
 
-        try std.testing.expectEqual(invalid_codepoint, val);
-        try std.testing.expectEqual(1, len.toLen());
-    }
-}
+        // Invalid lengths
+        &.{0b1000_0000},
+        &.{0b1111_1000},
+        &.{0b1111_1100},
+        &.{0b1111_1110},
+        &.{0b1111_1111},
 
-test "decodeBytes crashes" {
-    if (!build.slow_tests) return error.SkipZigTest;
+        // Continuations
+        &.{ 0b1110_0001, cont }, // 3 char
+        &.{ 0b1111_0001, cont }, // 4 char
+        &.{ 0b1111_0001, cont, cont }, // 4 char
 
-    // Ensure nothing crashes
-    for (0..std.math.maxInt(u32)) |bytes| {
-        const arr = std.mem.asBytes(&@as(u32, @intCast(bytes)));
-        const val, const len = decodeBytes(arr);
+        // Funky
+        &.{0b1100_0000}, // Invalid 2 char
+        &.{0b1100_0001}, // Invalid 2 char
+        &.{0b1111_0101}, // Out of range
+    };
 
-        try std.testing.expect(len.isValid());
-        std.mem.doNotOptimizeAway(&val);
+    inline for (sequences) |sequence| {
+        const str = sequence ++ "ABC";
+
+        // std.debug.print("\n", .{});
+        // std.debug.print("Testing: '{s}'\n", .{str});
+        // std.debug.print("Testing: '{X}'\n", .{str});
+        // std.debug.print("Testing: '{b}'\n", .{str});
+        // std.debug.print("Byte0  : 0b{b:0>8}'\n", .{str[0]});
+
+        var decoder: Decoder = .init(str);
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+
+        // Are we in a valid state after?
+        try std.testing.expectEqual('A', decoder.nextStrict());
+        try std.testing.expectEqual('B', decoder.nextStrict());
+        try std.testing.expectEqual('C', decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
     }
 }
 
 const std = @import("std");
-const build = @import("build");
 const root = @import("root.zig");
 
 const assert = std.debug.assert;
