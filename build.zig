@@ -1,21 +1,15 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const target = b.standardTargetOptions(.{ .default_target = .{ .cpu_model = .native } });
     const optimize = b.standardOptimizeOption(.{});
 
     // Main module
-    const slow_tests = b.option(bool, "slow_tests", "Run slow tests (ReleaseSafe reccomended)") orelse false;
-
-    const options = b.addOptions();
-    options.addOption(bool, "slow_tests", slow_tests);
-
     const utf8_mod = b.addModule("utf8", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    utf8_mod.addOptions("build", options);
 
     // Benchmarks
     bench(b, target, optimize, utf8_mod);
@@ -55,6 +49,19 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_tests.step);
     test_step.dependOn(&run_example_encode.step);
     test_step.dependOn(&run_example_decode.step);
+
+    const slow_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/test.zig"),
+            .target = target,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    const run_slow_tests = b.addRunArtifact(slow_tests);
+
+    const slow_test_step = b.step("slow_test", "Run all test, including slow ones");
+    slow_test_step.dependOn(&run_slow_tests.step);
+    slow_test_step.dependOn(test_step);
 }
 
 fn bench(

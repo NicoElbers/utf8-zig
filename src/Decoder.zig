@@ -29,142 +29,174 @@ pub fn nextIgnore(self: *Decoder) ?CodePoint {
 }
 
 pub fn nextStrict(self: *Decoder) Error!?CodePoint {
-    if (self.curr >= self.source.len) return null;
+    if (self.curr >= self.source.len) {
+        @branchHint(.unlikely);
+        return null;
+    }
+
+    const Length = enum {
+        len1,
+        len2,
+        len3,
+        len4,
+        surrogate3_low,
+        surrogate3_high,
+        surrogate4_low,
+        surrogate4_high,
+        reject,
+
+        const Length = @This();
+
+        pub const l1: Length = .len1;
+        pub const l2: Length = .len2;
+        pub const l3: Length = .len3;
+        pub const l4: Length = .len4;
+        pub const s3l: Length = .surrogate3_low;
+        pub const s3h: Length = .surrogate3_high;
+        pub const s4l: Length = .surrogate4_low;
+        pub const s4h: Length = .surrogate4_high;
+        pub const re: Length = .reject;
+    };
+
+    // Map all byte values to their length.
+    //
+    // There are 5 special cases here.
+    // 0xC0 is mapped to reject instead of len 2 as this is an overlong point
+    // 0xE0 is mapped to s3l as this byte needs an additional check on it's second byte
+    // 0xED is mapped to s3h as this byte needs an additional check on it's second byte
+    // 0xF0 is mapped to s4l as this byte needs an additional check on it's second byte
+    // 0xF4 is mapped to s4h as this byte needs an additional check on it's second byte
+    const lengths: [256]Length = .{
+        // ASCII, len 1
+        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x00 ... 0x0F
+        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x10 ... 0x1F
+        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x20 ... 0x2F
+        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x30 ... 0x3F
+        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x40 ... 0x4F
+        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x50 ... 0x5F
+        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x60 ... 0x6F
+        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x70 ... 0x7F
+
+        // Continuations
+        .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0x80 ... 0x8F
+        .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0x90 ... 0x9F
+        .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0xA0 ... 0xAF
+        .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0xB0 ... 0xBF
+
+        // len 2
+        .re, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, // 0xC0 ... 0xCF
+        .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, // 0xD0 ... 0xDF
+
+        // len 3
+        .s3l, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .s3h, .l3, .l3, // 0xE0 ... 0xEF
+
+        // len 4                   Out of range codepoints
+        .s4l, .l4, .l4, .l4, .s4h, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0xF0 ... 0xFF
+    };
+
+    const State = enum {
+        need1,
+        need2,
+        need3,
+    };
+
     const remaining = self.source[self.curr..];
 
-    const len: CodePointLen = .parse(remaining[0]);
+    var codepoint: CodePoint = 0;
 
-    if (!len.isValid()) {
-        @branchHint(.unlikely);
-        self.curr += 1;
-        return error.InvalidCodePoint;
-    }
-
-    // BUG: This is incorrect. If we have a broken surrogate this should turn
-    // into a single invalid character.
-    // Test case:
-    //   &.{ 0b1111_0000, 0b1001_0000, 0b1000_0000 }
-    // Should ouput (verified through python and rust)
-    //   &.{ error }
-    // Outputs
-    //   &.{ error, error, error }
-    // This will be much easier to fix once I integrate this with a reader, and
-    // I only want to do that once we have good buffered readers (IO rewrite).
-    if (remaining.len < len.toLen()) {
-        @branchHint(.unlikely);
-        self.curr += 1;
-        return error.IncompleteCodePoint;
-    }
-
-    return switch (len) {
-        .@"1" => blk: {
-            self.curr += 1;
-            break :blk remaining[0];
+    self.curr += 1;
+    var state: State = switch (lengths[remaining[0]]) {
+        .reject => {
+            @branchHint(.unlikely);
+            return error.InvalidCodePoint;
         },
-        .@"2" => blk: {
-            const bytes = remaining[0..2];
-
-            if (bytes[0] < 0b1100_0010 or // Non cannonical
-                bytes[1] & 0b1100_0000 != 0b1000_0000) // continuation
-            {
-                @branchHint(.unlikely);
-                self.curr += 1;
-                return error.InvalidCodePoint;
-            }
-
-            var codepoint: CodePoint = bytes[0] & 0b0001_1111;
-            codepoint <<= 6;
-            codepoint |= bytes[1] & 0b0011_1111;
-
-            self.curr += 2;
-            break :blk codepoint;
+        .len1 => {
+            return remaining[0];
         },
-        .@"3" => blk: {
-            const bytes = remaining[0..3];
-
-            // Surrogate
-            if ((bytes[0] == 0b1110_0000 and bytes[1] < 0b1010_0000) or
-                (bytes[0] == 0b1110_1101 and bytes[1] > 0b10011111))
-            {
-                @branchHint(.unlikely);
-                self.curr += 1;
-                return error.InvalidCodePoint;
-            }
-
-            // Continuations
-            if (bytes[1] & 0b1100_0000 != 0b1000_0000) {
-                @branchHint(.unlikely);
-                self.curr += 1;
-                return error.InvalidCodePoint;
-            }
-
-            if (bytes[2] & 0b1100_0000 != 0b1000_0000) {
-                @branchHint(.unlikely);
-                self.curr += 2;
-                return error.InvalidCodePoint;
-            }
-
-            var codepoint: CodePoint = bytes[0] & 0b0000_1111;
-            codepoint <<= 6;
-            codepoint |= bytes[1] & 0b0011_1111;
-            codepoint <<= 6;
-            codepoint |= bytes[2] & 0b0011_1111;
-
-            self.curr += 3;
-            break :blk codepoint;
+        .len2 => blk: {
+            codepoint = remaining[0] & 0b0001_1111;
+            break :blk .need1;
         },
-        .@"4" => blk: {
-            const bytes = remaining[0..4];
-
-            // Range
-            if (bytes[0] > 0b1111_0100) {
-                @branchHint(.unlikely);
-                self.curr += 1;
-                return error.InvalidCodePoint;
-            }
-
-            // Surrogate
-            if ((bytes[0] == 0b1111_0000 and bytes[1] < 0b1001_0000) or
-                (bytes[0] == 0b1111_0100 and bytes[1] > 0b1000_1111))
-            {
-                @branchHint(.unlikely);
-                self.curr += 1;
-                return error.InvalidCodePoint;
-            }
-
-            // Continuations
-            if (bytes[1] & 0b1100_0000 != 0b1000_0000) // Cont
-            {
-                @branchHint(.unlikely);
-                self.curr += 1;
-                return error.InvalidCodePoint;
-            }
-
-            if (bytes[2] & 0b1100_0000 != 0b1000_0000) {
-                @branchHint(.unlikely);
-                self.curr += 2;
-                return error.InvalidCodePoint;
-            }
-
-            if (bytes[3] & 0b1100_0000 != 0b1000_0000) {
-                @branchHint(.unlikely);
-                self.curr += 3;
-                return error.InvalidCodePoint;
-            }
-
-            var codepoint: CodePoint = bytes[0] & 0b0000_0111;
-            codepoint <<= 6;
-            codepoint |= bytes[1] & 0b0011_1111;
-            codepoint <<= 6;
-            codepoint |= bytes[2] & 0b0011_1111;
-            codepoint <<= 6;
-            codepoint |= bytes[3] & 0b0011_1111;
-
-            self.curr += 4;
-            break :blk codepoint;
+        .len3 => blk: {
+            codepoint = remaining[0] & 0b0000_1111;
+            break :blk .need2;
         },
-        else => unreachable,
+        .len4 => blk: {
+            codepoint = remaining[0] & 0b0000_0111;
+            break :blk .need3;
+        },
+
+        inline .surrogate3_low,
+        .surrogate3_high,
+        .surrogate4_low,
+        .surrogate4_high,
+        => |len| blk: {
+            if (remaining.len < 2) {
+                @branchHint(.unlikely);
+                return error.IncompleteCodePoint;
+            }
+
+            const byte = remaining[1];
+            switch (len) {
+                .surrogate3_low => {
+                    if (byte < 0b1010_0000) {
+                        @branchHint(.unlikely);
+                        return error.InvalidCodePoint;
+                    }
+
+                    codepoint = remaining[0] & 0b0000_1111;
+                    break :blk .need2;
+                },
+                .surrogate3_high => {
+                    if (byte > 0b1001_1111) {
+                        @branchHint(.unlikely);
+                        return error.InvalidCodePoint;
+                    }
+
+                    codepoint = remaining[0] & 0b0000_1111;
+                    break :blk .need2;
+                },
+                .surrogate4_low => {
+                    if (byte < 0b1001_0000) {
+                        @branchHint(.unlikely);
+                        return error.InvalidCodePoint;
+                    }
+
+                    codepoint = remaining[0] & 0b0000_0111;
+                    break :blk .need3;
+                },
+                .surrogate4_high => {
+                    if (byte > 0b1000_1111) {
+                        @branchHint(.unlikely);
+                        return error.InvalidCodePoint;
+                    }
+
+                    codepoint = remaining[0] & 0b0000_0111;
+                    break :blk .need3;
+                },
+                else => unreachable,
+            }
+        },
     };
+
+    for (remaining[1..]) |byte| {
+        if (byte & 0b1100_0000 != 0b1000_0000) {
+            @branchHint(.unlikely);
+            return error.InvalidCodePoint;
+        }
+
+        codepoint <<= 6;
+        codepoint |= byte & 0b0011_1111;
+        self.curr += 1;
+
+        state = switch (state) {
+            .need1 => return codepoint,
+            .need2 => .need1,
+            .need3 => .need2,
+        };
+    }
+
+    return error.IncompleteCodePoint;
 }
 
 test nextStrict {
@@ -246,9 +278,18 @@ test "All valid codepoints" {
     }
 }
 
-test "Invalid characters" {
+test "All surrogates" {
+    var bytes: [4]u8 = undefined;
+    for (0xD800..0xDFFF) |surrogate| {
+        const len = std.unicode.wtf8Encode(@intCast(surrogate), &bytes) catch unreachable;
+        var decoder: Decoder = .init(bytes[0..len]);
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+    }
+}
+
+test "Invalid codepoints" {
     const cont: u8 = 0b1000_0000;
-    _ = &cont;
 
     const sequences = [_][]const u8{
         // Simple
@@ -291,6 +332,97 @@ test "Invalid characters" {
         try std.testing.expectEqual('A', decoder.nextStrict());
         try std.testing.expectEqual('B', decoder.nextStrict());
         try std.testing.expectEqual('C', decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
+    }
+}
+
+test "Incomplete codepoints" {
+    const cont: u8 = 0b1000_0000;
+
+    const sequences = [_][]const u8{
+        &.{0b1100_0010}, // 2 char
+
+        // 3 char
+        &.{0b1110_0000},
+        &.{ 0b1110_0001, cont },
+
+        // 4 char
+        &.{0b1111_0000},
+        &.{ 0b1111_0001, cont },
+        &.{ 0b1111_0001, cont, cont },
+    };
+
+    for (sequences) |sequence| {
+        const str = sequence;
+
+        // std.debug.print("\n", .{});
+        // std.debug.print("Testing: '{s}'\n", .{str});
+        // std.debug.print("Testing: '{X}'\n", .{str});
+        // std.debug.print("Testing: '{b}'\n", .{str});
+        // std.debug.print("Byte0  : 0b{b:0>8}'\n", .{str[0]});
+
+        var decoder: Decoder = .init(str);
+
+        try std.testing.expectError(error.IncompleteCodePoint, decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
+    }
+}
+
+test "Incomplete surrogates" {
+    // Funny property I observed in python and rust is that if you have a 4
+    // byte length 'header', 3 bytes remaining however an invalid surrogate value
+    // you get 3 error values
+
+    {
+        const bytes: []const u8 = &.{ 0b1111_0000, 0b1000_0000, 0b1000_0000, 0b1000_0000 };
+        var decoder: Decoder = .init(bytes);
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
+    }
+    {
+        const bytes: []const u8 = &.{ 0b1111_0000, 0b1000_0000, 0b1000_0000 };
+        var decoder: Decoder = .init(bytes);
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
+    }
+    {
+        const bytes: []const u8 = &.{ 0b1111_0000, 0b1000_0000 };
+        var decoder: Decoder = .init(bytes);
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
+    }
+    {
+        const bytes: []const u8 = &.{ 0b1111_0000, 0b1000_0000 };
+        var decoder: Decoder = .init(bytes);
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
+    }
+    {
+        const bytes: []const u8 = &.{ 0b1110_0000, 0b1000_0000, 0b1000_0000 };
+        var decoder: Decoder = .init(bytes);
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
+    }
+    {
+        const bytes: []const u8 = &.{ 0b1110_0000, 0b1000_0000 };
+        var decoder: Decoder = .init(bytes);
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
         try std.testing.expectEqual(null, decoder.nextStrict());
     }
 }
