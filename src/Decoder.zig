@@ -37,6 +37,8 @@ pub fn nextStrict(self: *Decoder) Error!?CodePoint {
 
     const s: []const u8 = self.source[self.curr..];
 
+    // NOTE: When directly returning instead of doing this trick performance
+    // tanks by 30% - 90% (wtf LLVM)
     const codepoint: CodePoint =
         if (s[0] <= 0b0111_1111) blk: {
             self.curr += 1;
@@ -99,10 +101,12 @@ pub fn nextStrict(self: *Decoder) Error!?CodePoint {
 
             self.curr += 3;
 
-            break :blk @as(CodePoint, s[0] & 0b0000_1111) << 12 |
+            const codepoint = @as(CodePoint, s[0] & 0b0000_1111) << 12 |
                 @as(CodePoint, s[1] & 0b0011_1111) << 6 |
                 @as(CodePoint, s[2] & 0b0011_1111) << 0;
-        } else if (s[0] & 0b1111_1000 == 0b1111_0000 and s[0] <= 0xF4) blk: {
+
+            break :blk codepoint;
+        } else if (s[0] & 0b1111_1000 == 0b1111_0000 and s[0] <= 0b11110100) blk: {
             if (s.len < 2) {
                 @branchHint(.unlikely);
                 self.parseContinuations(s[1..]);
@@ -151,10 +155,6 @@ pub fn nextStrict(self: *Decoder) Error!?CodePoint {
             return error.InvalidCodePoint;
         };
 
-    if (codepoint >= 0xD800 and codepoint <= 0xDFFF) {
-        @branchHint(.unlikely);
-        return error.InvalidCodePoint;
-    }
     return codepoint;
 }
 
