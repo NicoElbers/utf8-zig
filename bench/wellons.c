@@ -3,7 +3,7 @@
 // clang-format off
 
 unsigned char const *
-atom_wellons_simple_utf8_decode(unsigned char const *s, uint32_t *c)
+wellons_simple_utf8_decode(unsigned char const *s, uint32_t *c)
 {
     unsigned char const *next;
     if (s[0] < 0x80) {
@@ -43,7 +43,7 @@ atom_wellons_simple_utf8_decode(unsigned char const *s, uint32_t *c)
 }
 
 void
-wellons_simple_spin(
+wellons_spin(
     unsigned char const *begin,
     unsigned char const *end,
     uint64_t *num_codepoints,
@@ -56,7 +56,7 @@ wellons_simple_spin(
     uint64_t ncodepoints = 0;
     unsigned char const *p = begin;
     while (p < end) {
-        p = atom_wellons_simple_utf8_decode(p, &codepoint);
+        p = wellons_simple_utf8_decode(p, &codepoint);
         if (codepoint == -1) {
             nerrors += 1;
         } else {

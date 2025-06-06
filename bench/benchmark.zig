@@ -187,8 +187,7 @@ const cases = [_]struct { *const fn ([]const u8) Spin, []const u8 }{
     .{ mineSpin, "mine" },
     .{ stdIteratorSpin, "std fixed" },
     .{ hoehrmannSpin, "hoehrmann" },
-    .{ wellonsSimpleSpin, "wellons simple" },
-    .{ wellonsBranchlessSpin, "wellons branchless" },
+    .{ wellonsSpin, "wellons" },
 };
 
 fn runAll(source: []const u8) [cases.len]Run {
@@ -322,7 +321,7 @@ fn hoehrmannSpin(source: []const u8) Spin {
     };
 }
 
-fn wellonsSimpleSpin(source: []const u8) Spin {
+fn wellonsSpin(source: []const u8) Spin {
     const begin = source.ptr;
     const end = source.ptr + source.len;
     var points: u64 = 0;
@@ -330,32 +329,7 @@ fn wellonsSimpleSpin(source: []const u8) Spin {
     var hash: u32 = 0;
 
     var timer = std.time.Timer.start() catch unreachable;
-    wellons_simple_spin(
-        begin,
-        end,
-        &points,
-        &errors,
-        &hash,
-    );
-    const time = timer.read();
-
-    return .{
-        .time_ns = time,
-        .codepoints = points,
-        .errors = errors,
-        .hash = hash,
-    };
-}
-
-fn wellonsBranchlessSpin(source: []const u8) Spin {
-    const begin = source.ptr;
-    const end = source.ptr + source.len;
-    var points: u64 = 0;
-    var errors: u64 = 0;
-    var hash: u32 = 0;
-
-    var timer = std.time.Timer.start() catch unreachable;
-    wellons_branchless_spin(
+    wellons_spin(
         begin,
         end,
         &points,
@@ -406,15 +380,7 @@ extern fn hoehrmann_spin(
     hash: *u32,
 ) void;
 
-extern fn wellons_branchless_spin(
-    begin: [*]const u8,
-    end: [*]const u8,
-    num_codepoints: *u64,
-    num_errors: *u64,
-    hash: *u32,
-) void;
-
-extern fn wellons_simple_spin(
+extern fn wellons_spin(
     begin: [*]const u8,
     end: [*]const u8,
     num_codepoints: *u64,

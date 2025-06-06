@@ -83,8 +83,7 @@ fn bench(
         .root = b.path("bench"),
         .files = &.{
             "hoehrmann.c",
-            "wellons_branchless.c",
-            "wellons_simple.c",
+            "wellons.c",
         },
         .flags = &.{ "-Wall", "-Werror", "-std=c11" },
     });
