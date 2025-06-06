@@ -70,27 +70,27 @@ fn bench(
     optimize: std.builtin.Mode,
     utf8_mod: *std.Build.Module,
 ) void {
-    const bench_decode_random_mod = b.createModule(.{
-        .root_source_file = b.path("benchmarks/decode_random.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    bench_decode_random_mod.addImport("utf8", utf8_mod);
-    const bench_decode_random_exe = b.addExecutable(.{
-        .name = "bench_decode_random",
-        .root_module = bench_decode_random_mod,
-    });
-    b.installArtifact(bench_decode_random_exe);
+    const bench_step = b.step("bench", "Benchmark application");
 
-    const bench_texts_mod = b.createModule(.{
-        .root_source_file = b.path("benchmarks/texts.zig"),
+    const bench_mod = b.createModule(.{
+        .root_source_file = b.path("bench/benchmark.zig"),
         .target = target,
         .optimize = optimize,
     });
-    bench_texts_mod.addImport("utf8", utf8_mod);
-    const bench_texts_exe = b.addExecutable(.{
-        .name = "bench_texts",
-        .root_module = bench_texts_mod,
+    bench_mod.addImport("utf8", utf8_mod);
+
+    bench_mod.addCSourceFiles(.{
+        .root = b.path("bench"),
+        .files = &.{
+            "hoehrmann.c",
+            "wellons_branchless.c",
+            "wellons_simple.c",
+        },
+        .flags = &.{ "-Wall", "-Werror", "-std=c11" },
     });
-    b.installArtifact(bench_texts_exe);
+    const bench_exe = b.addExecutable(.{
+        .name = "bench",
+        .root_module = bench_mod,
+    });
+    bench_step.dependOn(&b.addInstallArtifact(bench_exe, .{}).step);
 }

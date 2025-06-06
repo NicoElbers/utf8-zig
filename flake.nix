@@ -27,6 +27,8 @@
             bashInteractive
             zig_bound
             zls_bound
+            python3
+            python3Packages.matplotlib
           ];
         };
       });
