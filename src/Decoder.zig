@@ -28,366 +28,159 @@ pub fn nextIgnore(self: *Decoder) ?CodePoint {
     }
 }
 
-/// Get the next codepoint, extremely fast on ASCII, less speedy on UTF8.
+/// Get the next codepoint, returning an error on invalid codepoints
 pub fn nextStrict(self: *Decoder) Error!?CodePoint {
     if (self.curr >= self.source.len) {
         @branchHint(.unlikely);
         return null;
     }
 
-    const Length = enum {
-        len2,
-        len3,
-        len4,
-        surrogate3_low,
-        surrogate3_high,
-        surrogate4_low,
-        surrogate4_high,
-        reject,
+    const s: []const u8 = self.source[self.curr..];
 
-        const Length = @This();
+    const codepoint: CodePoint =
+        if (s[0] <= 0b0111_1111) blk: {
+            self.curr += 1;
 
-        pub const l2: Length = .len2;
-        pub const l3: Length = .len3;
-        pub const l4: Length = .len4;
-        pub const s3l: Length = .surrogate3_low;
-        pub const s3h: Length = .surrogate3_high;
-        pub const s4l: Length = .surrogate4_low;
-        pub const s4h: Length = .surrogate4_high;
-        pub const re: Length = .reject;
-    };
-
-    // Map byte values to their length. Does not map 1 length bytes as they are
-    // special cased for speed.
-    //
-    // There are 5 special cases here.
-    // 0xC0 is mapped to reject instead of len 2 as this is an overlong point
-    // 0xE0 is mapped to s3l as this byte needs an additional check on it's second byte
-    // 0xED is mapped to s3h as this byte needs an additional check on it's second byte
-    // 0xF0 is mapped to s4l as this byte needs an additional check on it's second byte
-    // 0xF4 is mapped to s4h as this byte needs an additional check on it's second byte
-    const lengths: [128]Length = .{
-        // // ASCII, len 1
-        // .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x00 ... 0x0F
-        // .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x10 ... 0x1F
-        // .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x20 ... 0x2F
-        // .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x30 ... 0x3F
-        // .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x40 ... 0x4F
-        // .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x50 ... 0x5F
-        // .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x60 ... 0x6F
-        // .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x70 ... 0x7F
-
-        // Continuations
-        .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0x80 ... 0x8F
-        .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0x90 ... 0x9F
-        .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0xA0 ... 0xAF
-        .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0xB0 ... 0xBF
-
-        // len 2
-        .re, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, // 0xC0 ... 0xCF
-        .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, // 0xD0 ... 0xDF
-
-        // len 3
-        .s3l, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .s3h, .l3, .l3, // 0xE0 ... 0xEF
-
-        // len 4                   Out of range codepoints
-        .s4l, .l4, .l4, .l4, .s4h, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0xF0 ... 0xFF
-    };
-
-    // This function is highly coupled with the implementation of this function
-    // therefore it's best to only define it in here.
-    const decodeRemaining = struct {
-        inline fn decodeRemaining(
-            s: *Decoder,
-            comptime need_bytes: comptime_int,
-            remaining: []const u8,
-            codepoint: *CodePoint,
-        ) Error!void {
-            assert(need_bytes <= 3);
-
-            const shift = 6 * need_bytes;
-            inline for (1..need_bytes + 1) |i| {
-                if (remaining.len <= i) {
-                    @branchHint(.unlikely);
-                    return error.IncompleteCodePoint;
-                }
-
-                const byte = remaining[i];
-
-                if (byte & 0b1100_0000 != 0b1000_0000) {
-                    @branchHint(.unlikely);
-                    return error.InvalidCodePoint;
-                }
-
-                codepoint.* |= @as(CodePoint, byte & 0b0011_1111) << (shift - (6 * i));
-                s.curr += 1;
-            }
-        }
-    }.decodeRemaining;
-
-    const remaining = self.source[self.curr..];
-
-    self.curr += 1;
-
-    // Avoids loading the lenghts table in the common case of ASCII, as well as
-    // allowing us to halve the lengths table.
-    //
-    // Quadruples performance when reading ASCII characters and increases
-    // UTF8 performance by roughly 25%
-    if (remaining[0] <= 0b0111_1111) {
-        return remaining[0];
-    }
-
-    var codepoint: CodePoint = 0;
-
-    return switch (lengths[remaining[0] & 0b0111_1111]) {
-        .reject => {
-            @branchHint(.unlikely);
-            return error.InvalidCodePoint;
-        },
-        .len2 => blk: {
-            codepoint = @as(CodePoint, remaining[0] & 0b0001_1111) << 6;
-            try decodeRemaining(self, 1, remaining, &codepoint);
-            break :blk codepoint;
-        },
-        .len3 => blk: {
-            codepoint = @as(CodePoint, remaining[0] & 0b0000_1111) << 12;
-            try decodeRemaining(self, 2, remaining, &codepoint);
-            break :blk codepoint;
-        },
-        .len4 => blk: {
-            codepoint = @as(CodePoint, remaining[0] & 0b0000_0111) << 18;
-            try decodeRemaining(self, 3, remaining, &codepoint);
-            break :blk codepoint;
-        },
-
-        inline .surrogate3_low,
-        .surrogate3_high,
-        .surrogate4_low,
-        .surrogate4_high,
-        => |len| blk: {
-            if (remaining.len < 2) {
+            break :blk s[0];
+        } else if (s[0] & 0b1110_0000 == 0b1100_0000) blk: {
+            if (s.len < 2) {
                 @branchHint(.unlikely);
+                self.parseContinuations(s[1..]);
+                self.curr += 1;
                 return error.IncompleteCodePoint;
             }
 
-            const byte = remaining[1];
-            switch (len) {
-                .surrogate3_low => {
-                    if (byte < 0b1010_0000) {
-                        @branchHint(.unlikely);
-                        return error.InvalidCodePoint;
-                    }
-
-                    codepoint = @as(CodePoint, remaining[0] & 0b0000_1111) << 12;
-                    try decodeRemaining(self, 2, remaining, &codepoint);
-                    break :blk codepoint;
-                },
-                .surrogate3_high => {
-                    if (byte > 0b1001_1111) {
-                        @branchHint(.unlikely);
-                        return error.InvalidCodePoint;
-                    }
-
-                    codepoint = @as(CodePoint, remaining[0] & 0b0000_1111) << 12;
-                    try decodeRemaining(self, 2, remaining, &codepoint);
-                    break :blk codepoint;
-                },
-                .surrogate4_low => {
-                    if (byte < 0b1001_0000) {
-                        @branchHint(.unlikely);
-                        return error.InvalidCodePoint;
-                    }
-
-                    codepoint = @as(CodePoint, remaining[0] & 0b0000_0111) << 18;
-                    try decodeRemaining(self, 3, remaining, &codepoint);
-                    break :blk codepoint;
-                },
-                .surrogate4_high => {
-                    if (byte > 0b1000_1111) {
-                        @branchHint(.unlikely);
-                        return error.InvalidCodePoint;
-                    }
-
-                    codepoint = @as(CodePoint, remaining[0] & 0b0000_0111) << 18;
-                    try decodeRemaining(self, 3, remaining, &codepoint);
-                    break :blk codepoint;
-                },
-                else => unreachable,
+            if (s[1] & 0b1100_0000 != 0b1000_0000) {
+                @branchHint(.unlikely);
+                self.parseContinuations(s[1..][0..1]);
+                self.curr += 1;
+                return error.InvalidCodePoint;
             }
-        },
-    };
+
+            self.curr += 2;
+
+            break :blk @as(CodePoint, s[0] & 0b0001_1111) << 6 |
+                @as(CodePoint, s[1] & 0b0011_1111) << 0;
+        } else if (s[0] & 0b1111_0000 == 0b1110_0000) blk: {
+            if (s.len < 2) {
+                @branchHint(.unlikely);
+                self.parseContinuations(s[1..]);
+                self.curr += 1;
+                return error.IncompleteCodePoint;
+            }
+
+            if (s[0] == 0b1110_0000 and s[1] < 0b1010_0000) {
+                @branchHint(.unlikely);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
+            if (s[0] == 0b1110_1101 and s[1] > 0b1001_1111) {
+                @branchHint(.unlikely);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
+            if (s.len < 3) {
+                @branchHint(.unlikely);
+                self.parseContinuations(s[1..]);
+                self.curr += 1;
+                return error.IncompleteCodePoint;
+            }
+
+            if (s[1] & 0b1100_0000 != 0b1000_0000 or
+                s[2] & 0b1100_0000 != 0b1000_0000)
+            {
+                @branchHint(.unlikely);
+                self.parseContinuations(s[1..][0..2]);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
+            self.curr += 3;
+
+            break :blk @as(CodePoint, s[0] & 0b0000_1111) << 12 |
+                @as(CodePoint, s[1] & 0b0011_1111) << 6 |
+                @as(CodePoint, s[2] & 0b0011_1111) << 0;
+        } else if (s[0] & 0b1111_1000 == 0b1111_0000 and s[0] <= 0xF4) blk: {
+            if (s.len < 2) {
+                @branchHint(.unlikely);
+                self.parseContinuations(s[1..]);
+                self.curr += 1;
+                return error.IncompleteCodePoint;
+            }
+
+            if (s[0] == 0b1111_0000 and s[1] < 0b1001_0000) {
+                @branchHint(.unlikely);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
+            if (s[0] == 0b1111_0100 and s[1] > 0b1000_1111) {
+                @branchHint(.unlikely);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
+            if (s.len < 4) {
+                @branchHint(.unlikely);
+                self.parseContinuations(s[1..]);
+                self.curr += 1;
+                return error.IncompleteCodePoint;
+            }
+
+            if (s[1] & 0b1100_0000 != 0b1000_0000 or
+                s[2] & 0b1100_0000 != 0b1000_0000 or
+                s[3] & 0b1100_0000 != 0b1000_0000)
+            {
+                @branchHint(.unlikely);
+                self.parseContinuations(s[1..][0..3]);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
+            self.curr += 4;
+
+            break :blk @as(CodePoint, s[0] & 0b0000_0111) << 18 |
+                @as(CodePoint, s[1] & 0b0011_1111) << 12 |
+                @as(CodePoint, s[2] & 0b0011_1111) << 6 |
+                @as(CodePoint, s[3] & 0b0011_1111) << 0;
+        } else {
+            @branchHint(.unlikely);
+            self.curr += 1;
+            return error.InvalidCodePoint;
+        };
+
+    if (codepoint >= 0xD800 and codepoint <= 0xDFFF) {
+        @branchHint(.unlikely);
+        return error.InvalidCodePoint;
+    }
+    return codepoint;
 }
 
-pub fn nextFSM(self: *Decoder) Error!?CodePoint {
-    if (self.curr >= self.source.len) {
-        @branchHint(.unlikely);
-        return null;
+/// Takes a slice of potential continuations, adds the amount of
+/// valid continuations from self.curr
+///
+/// Asserts the size of the slice is < 4
+fn parseContinuations(self: *Decoder, slice: []const u8) void {
+    assert(slice.len < 4); // With a slice of 4 we can always get a codepoint
+
+    switch (slice.len) {
+        0 => {},
+        1 => {
+            if (slice[0] & 0b1100_0000 == 0b1000_0000) self.curr += 1 else return;
+        },
+        2 => {
+            if (slice[0] & 0b1100_0000 == 0b1000_0000) self.curr += 1 else return;
+            if (slice[1] & 0b1100_0000 == 0b1000_0000) self.curr += 1 else return;
+        },
+        3 => {
+            if (slice[0] & 0b1100_0000 == 0b1000_0000) self.curr += 1 else return;
+            if (slice[1] & 0b1100_0000 == 0b1000_0000) self.curr += 1 else return;
+            if (slice[2] & 0b1100_0000 == 0b1000_0000) self.curr += 1 else return;
+        },
+        else => unreachable,
     }
-
-    const Length = enum {
-        len1,
-        len2,
-        len3,
-        len4,
-        surrogate3_low,
-        surrogate3_high,
-        surrogate4_low,
-        surrogate4_high,
-        reject,
-
-        const Length = @This();
-
-        pub const l1: Length = .len1;
-        pub const l2: Length = .len2;
-        pub const l3: Length = .len3;
-        pub const l4: Length = .len4;
-        pub const s3l: Length = .surrogate3_low;
-        pub const s3h: Length = .surrogate3_high;
-        pub const s4l: Length = .surrogate4_low;
-        pub const s4h: Length = .surrogate4_high;
-        pub const re: Length = .reject;
-    };
-
-    // Map all byte values to their length.
-    //
-    // There are 5 special cases here.
-    // 0xC0 is mapped to reject instead of len 2 as this is an overlong point
-    // 0xE0 is mapped to s3l as this byte needs an additional check on it's second byte
-    // 0xED is mapped to s3h as this byte needs an additional check on it's second byte
-    // 0xF0 is mapped to s4l as this byte needs an additional check on it's second byte
-    // 0xF4 is mapped to s4h as this byte needs an additional check on it's second byte
-    const lengths: [256]Length = .{
-        // ASCII, len 1
-        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x00 ... 0x0F
-        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x10 ... 0x1F
-        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x20 ... 0x2F
-        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x30 ... 0x3F
-        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x40 ... 0x4F
-        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x50 ... 0x5F
-        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x60 ... 0x6F
-        .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, .l1, // 0x70 ... 0x7F
-
-        // Continuations
-        .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0x80 ... 0x8F
-        .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0x90 ... 0x9F
-        .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0xA0 ... 0xAF
-        .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0xB0 ... 0xBF
-
-        // len 2
-        .re, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, // 0xC0 ... 0xCF
-        .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, .l2, // 0xD0 ... 0xDF
-
-        // len 3
-        .s3l, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .l3, .s3h, .l3, .l3, // 0xE0 ... 0xEF
-
-        // len 4                   Out of range codepoints
-        .s4l, .l4, .l4, .l4, .s4h, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, .re, // 0xF0 ... 0xFF
-    };
-
-    const State = enum {
-        need1,
-        need2,
-        need3,
-    };
-
-    const remaining = self.source[self.curr..];
-
-    var codepoint: CodePoint = 0;
-
-    self.curr += 1;
-    var state: State = switch (lengths[remaining[0]]) {
-        .reject => {
-            @branchHint(.unlikely);
-            return error.InvalidCodePoint;
-        },
-        .len1 => {
-            return remaining[0];
-        },
-        .len2 => blk: {
-            codepoint = remaining[0] & 0b0001_1111;
-            break :blk .need1;
-        },
-        .len3 => blk: {
-            codepoint = remaining[0] & 0b0000_1111;
-            break :blk .need2;
-        },
-        .len4 => blk: {
-            codepoint = remaining[0] & 0b0000_0111;
-            break :blk .need3;
-        },
-
-        inline .surrogate3_low,
-        .surrogate3_high,
-        .surrogate4_low,
-        .surrogate4_high,
-        => |len| blk: {
-            if (remaining.len < 2) {
-                @branchHint(.unlikely);
-                return error.IncompleteCodePoint;
-            }
-
-            const byte = remaining[1];
-            switch (len) {
-                .surrogate3_low => {
-                    if (byte < 0b1010_0000) {
-                        @branchHint(.unlikely);
-                        return error.InvalidCodePoint;
-                    }
-
-                    codepoint = remaining[0] & 0b0000_1111;
-                    break :blk .need2;
-                },
-                .surrogate3_high => {
-                    if (byte > 0b1001_1111) {
-                        @branchHint(.unlikely);
-                        return error.InvalidCodePoint;
-                    }
-
-                    codepoint = remaining[0] & 0b0000_1111;
-                    break :blk .need2;
-                },
-                .surrogate4_low => {
-                    if (byte < 0b1001_0000) {
-                        @branchHint(.unlikely);
-                        return error.InvalidCodePoint;
-                    }
-
-                    codepoint = remaining[0] & 0b0000_0111;
-                    break :blk .need3;
-                },
-                .surrogate4_high => {
-                    if (byte > 0b1000_1111) {
-                        @branchHint(.unlikely);
-                        return error.InvalidCodePoint;
-                    }
-
-                    codepoint = remaining[0] & 0b0000_0111;
-                    break :blk .need3;
-                },
-                else => unreachable,
-            }
-        },
-    };
-
-    for (remaining[1..]) |byte| {
-        if (byte & 0b1100_0000 != 0b1000_0000) {
-            @branchHint(.unlikely);
-            return error.InvalidCodePoint;
-        }
-
-        codepoint <<= 6;
-        codepoint |= byte & 0b0011_1111;
-        self.curr += 1;
-
-        state = switch (state) {
-            .need1 => return codepoint,
-            .need2 => .need1,
-            .need3 => .need2,
-        };
-    }
-
-    return error.IncompleteCodePoint;
 }
 
 test nextStrict {
@@ -565,6 +358,23 @@ test "Incomplete surrogates" {
     // you get 3 error values
 
     {
+        const bytes: []const u8 = &.{ 0b1110_0000, 0b1000_0000, 0b1000_0000 };
+        var decoder: Decoder = .init(bytes);
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
+    }
+    {
+        const bytes: []const u8 = &.{ 0b1110_0000, 0b1000_0000 };
+        var decoder: Decoder = .init(bytes);
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
+    }
+    {
         const bytes: []const u8 = &.{ 0b1111_0000, 0b1000_0000, 0b1000_0000, 0b1000_0000 };
         var decoder: Decoder = .init(bytes);
 
@@ -593,23 +403,6 @@ test "Incomplete surrogates" {
     }
     {
         const bytes: []const u8 = &.{ 0b1111_0000, 0b1000_0000 };
-        var decoder: Decoder = .init(bytes);
-
-        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
-        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
-        try std.testing.expectEqual(null, decoder.nextStrict());
-    }
-    {
-        const bytes: []const u8 = &.{ 0b1110_0000, 0b1000_0000, 0b1000_0000 };
-        var decoder: Decoder = .init(bytes);
-
-        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
-        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
-        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
-        try std.testing.expectEqual(null, decoder.nextStrict());
-    }
-    {
-        const bytes: []const u8 = &.{ 0b1110_0000, 0b1000_0000 };
         var decoder: Decoder = .init(bytes);
 
         try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
