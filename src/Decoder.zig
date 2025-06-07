@@ -69,9 +69,32 @@ pub fn nextStrict(self: *Decoder) Error!?CodePoint {
 
             break :blk @as(CodePoint, s[0] & 0b0001_1111) << 6 |
                 @as(CodePoint, s[1] & 0b0011_1111) << 0;
-        } else if (s[0] & 0b1111_0000 == 0b1110_0000 and s[0] >= 0b1100_0010) blk: {
-            if (s.len < 2) {
+        } else if (s[0] & 0b1111_0000 == 0b1110_0000) blk: {
+            if (s.len < 3) {
                 @branchHint(.unlikely);
+
+                // Little bit of trickery to optimize the happy path while
+                // retaining correct behavior
+                if (s.len < 2) {
+                    @branchHint(.unlikely);
+
+                    self.parseContinuations(s[1..]);
+                    self.curr += 1;
+                    return error.IncompleteCodePoint;
+                }
+
+                if (s[0] == 0b1110_0000 and s[1] < 0b1010_0000) {
+                    @branchHint(.unlikely);
+                    self.curr += 1;
+                    return error.InvalidCodePoint;
+                }
+
+                if (s[0] == 0b1110_1101 and s[1] > 0b1001_1111) {
+                    @branchHint(.unlikely);
+                    self.curr += 1;
+                    return error.InvalidCodePoint;
+                }
+
                 self.parseContinuations(s[1..]);
                 self.curr += 1;
                 return error.IncompleteCodePoint;
@@ -87,13 +110,6 @@ pub fn nextStrict(self: *Decoder) Error!?CodePoint {
                 @branchHint(.unlikely);
                 self.curr += 1;
                 return error.InvalidCodePoint;
-            }
-
-            if (s.len < 3) {
-                @branchHint(.unlikely);
-                self.parseContinuations(s[1..]);
-                self.curr += 1;
-                return error.IncompleteCodePoint;
             }
 
             if (s[1] & 0b1100_0000 != 0b1000_0000 or
@@ -117,8 +133,30 @@ pub fn nextStrict(self: *Decoder) Error!?CodePoint {
                 return error.InvalidCodePoint;
             }
 
-            if (s.len < 2) {
+            if (s.len < 4) {
                 @branchHint(.unlikely);
+
+                // Little bit of trickery to optimize the happy path while
+                // retaining correct behavior
+                if (s.len < 2) {
+                    @branchHint(.unlikely);
+                    self.parseContinuations(s[1..]);
+                    self.curr += 1;
+                    return error.IncompleteCodePoint;
+                }
+
+                if (s[0] == 0b1111_0000 and s[1] < 0b1001_0000) {
+                    @branchHint(.unlikely);
+                    self.curr += 1;
+                    return error.InvalidCodePoint;
+                }
+
+                if (s[0] == 0b1111_0100 and s[1] > 0b1000_1111) {
+                    @branchHint(.unlikely);
+                    self.curr += 1;
+                    return error.InvalidCodePoint;
+                }
+
                 self.parseContinuations(s[1..]);
                 self.curr += 1;
                 return error.IncompleteCodePoint;
@@ -134,13 +172,6 @@ pub fn nextStrict(self: *Decoder) Error!?CodePoint {
                 @branchHint(.unlikely);
                 self.curr += 1;
                 return error.InvalidCodePoint;
-            }
-
-            if (s.len < 4) {
-                @branchHint(.unlikely);
-                self.parseContinuations(s[1..]);
-                self.curr += 1;
-                return error.IncompleteCodePoint;
             }
 
             if (s[1] & 0b1100_0000 != 0b1000_0000 or
