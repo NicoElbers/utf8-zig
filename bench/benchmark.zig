@@ -120,7 +120,7 @@ pub fn main() !void {
         }
 
         std.debug.print("\nrandom Len 1 bytes: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random len 1 bytes", .run = &runAll(&buf) });
+        try tests.append(gpa, .{ .name = "random len 1 characters", .run = &runAll(&buf) });
     }
     {
         var i: usize = 0;
@@ -131,7 +131,7 @@ pub fn main() !void {
         }
 
         std.debug.print("\nrandom Len 2 bytes: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random len 2 bytes", .run = &runAll(buf[0..i]) });
+        try tests.append(gpa, .{ .name = "random len 2 characters", .run = &runAll(buf[0..i]) });
     }
     {
         var i: usize = 0;
@@ -142,7 +142,7 @@ pub fn main() !void {
         }
 
         std.debug.print("\nrandom Len 3 bytes: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random len 3 bytes", .run = &runAll(buf[0..i]) });
+        try tests.append(gpa, .{ .name = "random len 3 characters", .run = &runAll(buf[0..i]) });
     }
     {
         var i: usize = 0;
@@ -153,7 +153,7 @@ pub fn main() !void {
         }
 
         std.debug.print("\nrandom Len 4 bytes: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random len 4 bytes", .run = &runAll(buf[0..i]) });
+        try tests.append(gpa, .{ .name = "random len 4 characters", .run = &runAll(buf[0..i]) });
     }
     {
         var i: usize = 0;
@@ -163,7 +163,7 @@ pub fn main() !void {
         }
 
         std.debug.print("\nrandom utf8: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random utf8 bytes", .run = &runAll(buf[0..i]) });
+        try tests.append(gpa, .{ .name = "random UTF8 characters", .run = &runAll(buf[0..i]) });
     }
     {
         var i: usize = 0;
@@ -172,7 +172,7 @@ pub fn main() !void {
         }
 
         std.debug.print("\nrandom wtf8 bytes: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random WTF8 bytes", .run = &runAll(buf[0..i]) });
+        try tests.append(gpa, .{ .name = "random WTF8 characters", .run = &runAll(buf[0..i]) });
     }
 
     const writer = std.io.getStdOut().writer();
