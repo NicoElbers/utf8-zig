@@ -39,6 +39,18 @@ pub fn build(b: *std.Build) void {
     });
     const run_example_decode = b.addRunArtifact(example_decode_exe);
 
+    const example_reader_mod = b.createModule(.{
+        .root_source_file = b.path("examples/reader.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    example_reader_mod.addImport("utf8", utf8_mod);
+    const example_reader_exe = b.addExecutable(.{
+        .name = "example_reader",
+        .root_module = example_reader_mod,
+    });
+    b.installArtifact(example_reader_exe);
+
     // Tests
     const tests = b.addTest(.{
         .root_module = utf8_mod,
