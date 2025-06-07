@@ -45,6 +45,12 @@ pub fn nextStrict(self: *Decoder) Error!?CodePoint {
 
             break :blk s[0];
         } else if (s[0] & 0b1110_0000 == 0b1100_0000) blk: {
+            if (s[0] < 0b1100_0010) {
+                @branchHint(.unlikely);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
+
             if (s.len < 2) {
                 @branchHint(.unlikely);
                 self.parseContinuations(s[1..]);
@@ -63,7 +69,7 @@ pub fn nextStrict(self: *Decoder) Error!?CodePoint {
 
             break :blk @as(CodePoint, s[0] & 0b0001_1111) << 6 |
                 @as(CodePoint, s[1] & 0b0011_1111) << 0;
-        } else if (s[0] & 0b1111_0000 == 0b1110_0000) blk: {
+        } else if (s[0] & 0b1111_0000 == 0b1110_0000 and s[0] >= 0b1100_0010) blk: {
             if (s.len < 2) {
                 @branchHint(.unlikely);
                 self.parseContinuations(s[1..]);
@@ -101,12 +107,16 @@ pub fn nextStrict(self: *Decoder) Error!?CodePoint {
 
             self.curr += 3;
 
-            const codepoint = @as(CodePoint, s[0] & 0b0000_1111) << 12 |
+            break :blk @as(CodePoint, s[0] & 0b0000_1111) << 12 |
                 @as(CodePoint, s[1] & 0b0011_1111) << 6 |
                 @as(CodePoint, s[2] & 0b0011_1111) << 0;
+        } else if (s[0] & 0b1111_1000 == 0b1111_0000) blk: {
+            if (s[0] > 0b1111_0100) {
+                @branchHint(.unlikely);
+                self.curr += 1;
+                return error.InvalidCodePoint;
+            }
 
-            break :blk codepoint;
-        } else if (s[0] & 0b1111_1000 == 0b1111_0000 and s[0] <= 0b11110100) blk: {
             if (s.len < 2) {
                 @branchHint(.unlikely);
                 self.parseContinuations(s[1..]);
@@ -276,10 +286,11 @@ test "Invalid codepoints" {
     const cont: u8 = 0b1000_0000;
 
     const sequences = [_][]const u8{
-        // Simple
-        &.{0b1100_0010}, // 2 char wo continuations
-        &.{0b1110_0000}, // 3 char wo continuations
-        &.{0b1111_0000}, // 4 char wo continuations
+
+        // No continuations
+        &.{0b1100_0010},
+        &.{0b1110_0000},
+        &.{0b1111_0000},
 
         // Invalid lengths
         &.{0b1000_0000},
@@ -316,6 +327,35 @@ test "Invalid codepoints" {
         try std.testing.expectEqual('A', decoder.nextStrict());
         try std.testing.expectEqual('B', decoder.nextStrict());
         try std.testing.expectEqual('C', decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
+    }
+}
+
+test "Boundaries" {
+    {
+        var decoder: Decoder = .init(&.{ 0b1100_0000, 0b1000_0000, 'A' });
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectEqual('A', decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
+    }
+    {
+        var decoder: Decoder = .init(&.{ 0b1100_0001, 0b1000_0000, 'A' });
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectEqual('A', decoder.nextStrict());
+        try std.testing.expectEqual(null, decoder.nextStrict());
+    }
+    {
+        var decoder: Decoder = .init(&.{ 0b1111_0101, 0b1000_0000, 0b1000_0000, 0b1000_0000, 'A' });
+
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectError(error.InvalidCodePoint, decoder.nextStrict());
+        try std.testing.expectEqual('A', decoder.nextStrict());
         try std.testing.expectEqual(null, decoder.nextStrict());
     }
 }
