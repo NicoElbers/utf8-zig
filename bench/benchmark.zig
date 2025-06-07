@@ -23,78 +23,13 @@ const TestCase = struct { name: []const u8, run: []const Run };
 
 const timeout = 10;
 
-fn randomCodePointLen1(r: Random) [1]u8 {
-    return .{r.int(u7)};
-}
-fn randomCodePointLen2(r: Random) [2]u8 {
-    const len: u8 = 0b1100_0000 | @as(u8, r.int(u5));
-    const cont1: u8 = 0b1000_0000 | @as(u8, r.int(u6));
-
-    return .{ len, cont1 };
-}
-fn randomCodePointLen3(r: Random) [3]u8 {
-    while (true) {
-        const len: u8 = 0b1110_0000 | @as(u8, r.int(u4));
-        const cont1: u8 = 0b1000_0000 | @as(u8, r.int(u6));
-        const cont2: u8 = 0b1000_0000 | @as(u8, r.int(u6));
-
-        if (len == 0b1110_0000 and cont1 < 0b1010_0000)
-            continue;
-
-        if (len == 0b1110_1101 and cont1 > 0b1001_1111)
-            continue;
-
-        return .{ len, cont1, cont2 };
-    }
-}
-fn randomCodePointLen4(r: Random) [4]u8 {
-    while (true) {
-        const len: u8 = 0b1111_0000 | @as(u8, r.int(u3));
-        const cont1: u8 = 0b1000_0000 | @as(u8, r.int(u6));
-        const cont2: u8 = 0b1000_0000 | @as(u8, r.int(u6));
-        const cont3: u8 = 0b1000_0000 | @as(u8, r.int(u6));
-
-        if (len > 0b11110100)
-            continue;
-
-        if (len == 0b1111_0000 and cont1 < 0b1001_0000)
-            continue;
-
-        if (len == 0b1111_0100 and cont1 > 0b1000_1111)
-            continue;
-
-        return .{ len, cont1, cont2, cont3 };
-    }
-}
-
-fn randomCodePoint(r: Random, ret: *[4]u8) usize {
-    const Len = enum { len1, len2, len3, len4 };
-
-    const len = r.enumValue(Len);
-
-    return switch (len) {
-        .len1 => {
-            const cp = randomCodePointLen1(r);
-            @memcpy(ret[0..1], &cp);
-            return 1;
-        },
-        .len2 => {
-            const cp = randomCodePointLen2(r);
-            @memcpy(ret[0..2], &cp);
-            return 2;
-        },
-        .len3 => {
-            const cp = randomCodePointLen3(r);
-            @memcpy(ret[0..3], &cp);
-            return 3;
-        },
-        .len4 => {
-            const cp = randomCodePointLen4(r);
-            @memcpy(ret[0..4], &cp);
-            return 4;
-        },
-    };
-}
+const cases = [_]struct { *const fn ([]const u8) Spin, []const u8 }{
+    .{ mineSpin, "utf8-zig" },
+    // .{ mineSpin2, "utf8-zig 2" },
+    .{ stdIteratorSpin, "std fixed" },
+    .{ hoehrmannSpin, "hoehrmann" },
+    .{ wellonsSpin, "wellons" },
+};
 
 pub fn main() !void {
     var dbg_inst = std.heap.DebugAllocator(.{}).init;
@@ -158,7 +93,7 @@ pub fn main() !void {
     {
         var i: usize = 0;
         while (i < buf.len - 4) {
-            const len = randomCodePoint(rand, buf[0..4]);
+            const len = randomCodePoint(rand, buf[i..][0..4]);
             i += len;
         }
 
@@ -168,7 +103,8 @@ pub fn main() !void {
     {
         var i: usize = 0;
         while (i < buf.len - 4) {
-            i += std.unicode.wtf8Encode(rand.int(u21), buf[i .. i + 4]) catch continue;
+            const len = randomWTFCodePoint(rand, buf[i..][0..4]);
+            i += len;
         }
 
         std.debug.print("\nrandom wtf8 bytes: ({d} bytes)\n", .{i});
@@ -178,13 +114,6 @@ pub fn main() !void {
     const writer = std.io.getStdOut().writer();
     try std.json.stringify(tests.items, .{}, writer);
 }
-
-const cases = [_]struct { *const fn ([]const u8) Spin, []const u8 }{
-    .{ mineSpin, "utf8-zig" },
-    .{ stdIteratorSpin, "std fixed" },
-    .{ hoehrmannSpin, "hoehrmann" },
-    .{ wellonsSpin, "wellons" },
-};
 
 fn runAll(source: []const u8) [cases.len]Run {
     var res: [cases.len]Run = undefined;
@@ -292,6 +221,32 @@ fn mineSpin(source: []const u8) Spin {
     };
 }
 
+fn mineSpin2(source: []const u8) Spin {
+    var decoder: utf8.Decoder = .init(source);
+
+    var points: u64 = 0;
+    var errors: u64 = 0;
+    var hash: u32 = 0;
+
+    var timer = std.time.Timer.start() catch unreachable;
+    while (true) {
+        hash ^= decoder.nextStrict2() catch {
+            errors += 1;
+            continue;
+        } orelse break;
+
+        points += 1;
+    }
+    const time = timer.read();
+
+    return .{
+        .time_ns = time,
+        .codepoints = points,
+        .errors = errors,
+        .hash = hash,
+    };
+}
+
 fn hoehrmannSpin(source: []const u8) Spin {
     const begin = source.ptr;
     const end = source.ptr + source.len;
@@ -383,6 +338,131 @@ extern fn wellons_spin(
     num_errors: *u64,
     hash: *u32,
 ) void;
+
+fn randomCodePointLen1(r: Random) [1]u8 {
+    return .{r.int(u7)};
+}
+fn randomCodePointLen2(r: Random) [2]u8 {
+    while (true) {
+        const len: u8 = 0b1100_0000 | @as(u8, r.int(u5));
+        const cont1: u8 = 0b1000_0000 | @as(u8, r.int(u6));
+
+        if (len < 0b1100_0010)
+            continue;
+
+        return .{ len, cont1 };
+    }
+}
+
+fn randomWTFCodePointLen3(r: Random) [3]u8 {
+    while (true) {
+        const len: u8 = 0b1110_0000 | @as(u8, r.int(u4));
+        const cont1: u8 = 0b1000_0000 | @as(u8, r.int(u6));
+        const cont2: u8 = 0b1000_0000 | @as(u8, r.int(u6));
+
+        return .{ len, cont1, cont2 };
+    }
+}
+
+fn randomCodePointLen3(r: Random) [3]u8 {
+    while (true) {
+        const ret = randomWTFCodePointLen3(r);
+
+        if (ret[0] == 0b1110_0000 and ret[1] < 0b1010_0000)
+            continue;
+
+        if (ret[0] == 0b1110_1101 and ret[1] > 0b1001_1111)
+            continue;
+
+        return ret;
+    }
+}
+
+fn randomWTFCodePointLen4(r: Random) [4]u8 {
+    while (true) {
+        const len: u8 = 0b1111_0000 | @as(u8, r.int(u3));
+        const cont1: u8 = 0b1000_0000 | @as(u8, r.int(u6));
+        const cont2: u8 = 0b1000_0000 | @as(u8, r.int(u6));
+        const cont3: u8 = 0b1000_0000 | @as(u8, r.int(u6));
+
+        if (len > 0b11110100)
+            continue;
+
+        return .{ len, cont1, cont2, cont3 };
+    }
+}
+
+fn randomCodePointLen4(r: Random) [4]u8 {
+    while (true) {
+        const ret = randomWTFCodePointLen4(r);
+
+        if (ret[0] == 0b1111_0000 and ret[1] < 0b1001_0000)
+            continue;
+
+        if (ret[0] == 0b1111_0100 and ret[1] > 0b1000_1111)
+            continue;
+
+        return ret;
+    }
+}
+
+fn randomWTFCodePoint(r: Random, ret: *[4]u8) usize {
+    const Len = enum { len1, len2, len3, len4 };
+
+    const len = r.enumValue(Len);
+
+    return switch (len) {
+        .len1 => {
+            const cp = randomCodePointLen1(r);
+            @memcpy(ret[0..1], &cp);
+            return 1;
+        },
+        .len2 => {
+            const cp = randomCodePointLen2(r);
+            @memcpy(ret[0..2], &cp);
+            return 2;
+        },
+        .len3 => {
+            const cp = randomWTFCodePointLen3(r);
+            @memcpy(ret[0..3], &cp);
+            return 3;
+        },
+        .len4 => {
+            const cp = randomWTFCodePointLen4(r);
+            @memcpy(ret[0..4], &cp);
+            return 4;
+        },
+    };
+}
+
+fn randomCodePoint(r: Random, ret: *[4]u8) usize {
+    const Len = enum { len1, len2, len3, len4 };
+
+    const len = r.enumValue(Len);
+
+    return switch (len) {
+        .len1 => {
+            const cp = randomCodePointLen1(r);
+            @memcpy(ret[0..1], &cp);
+            return 1;
+        },
+        .len2 => {
+            const cp = randomCodePointLen2(r);
+            @memcpy(ret[0..2], &cp);
+            return 2;
+        },
+        .len3 => {
+            const cp = randomCodePointLen3(r);
+            @memcpy(ret[0..3], &cp);
+            return 3;
+        },
+        .len4 => {
+            const cp = randomCodePointLen4(r);
+            @memcpy(ret[0..4], &cp);
+            return 4;
+        },
+    };
+}
 
 const std = @import("std");
 const utf8 = @import("utf8");
