@@ -1,91 +1,90 @@
+# Written by deepseek, I can't be fucked to write python tbh
+
 import json
-import sys
-import os
-import re
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import numpy as np
-from matplotlib import cm
-from matplotlib.lines import Line2D
-from matplotlib.patches import Rectangle
+import textwrap
 
-def sanitize_filename(name):
-    """Remove invalid characters from filenames"""
-    return re.sub(r'[\\/*?:"<>|]', "_", name)
+# Load benchmark data
+with open('data.json') as f:
+    test_cases = json.load(f)
 
-# Load JSON data from stdin
-data = json.load(sys.stdin)
+# Configure colors
+DEFAULT_COLOR = '#AAAAAA'  # Light grey
+HIGHLIGHT_COLOR = '#FFD700'  # Bright yellow (gold)
+ERROR_COLOR = '#666666'  # Dark grey for error bars
 
-# Prepare color palette
-colors = cm.viridis(np.linspace(0, 1, 10))
-
-# Create output directory if it doesn't exist
-output_dir = "benchmark_plots"
-os.makedirs(output_dir, exist_ok=True)
-
-# Create a separate plot for each test case
-for test_case in data:
-    test_name = test_case['name']
-    runs = test_case['run']
+for case in test_cases:
+    case_name = case['name']
+    runs = case['run']
     
-    # Create figure for this test case
-    fig, ax = plt.subplots(figsize=(12, 6))
-    x_pos = np.arange(len(runs))
-    bar_width = 0.7
+    # Sort runs by median performance (fastest first)
+    runs.sort(key=lambda x: x['p50_ms'])
     
-    # Plot each run in the test case
-    for i, run in enumerate(runs):
-        # Calculate quartile positions
-        q1 = run['p25_ms']
-        median = run['p50_ms']
-        q3 = run['p75_ms']
-        
-        # Draw IQR box (from Q1 to Q3)
-        ax.bar(i, q3 - q1, bottom=q1, width=bar_width, 
-               color=colors[i % len(colors)], alpha=0.7)
-        
-        # Draw median line
-        ax.hlines(median, i - bar_width/2, i + bar_width/2, 
-                 colors='white', linewidth=2, zorder=3)
-        
-        # Draw min/max whiskers
-        ax.vlines(i, run['min_ms'], run['max_ms'], 
-                 colors='gray', linewidth=1, alpha=0.7)
-        
-        # Add min/max caps
-        ax.hlines(run['min_ms'], i - bar_width/3, i + bar_width/3, 
-                 colors='gray', linewidth=1)
-        ax.hlines(run['max_ms'], i - bar_width/3, i + bar_width/3, 
-                 colors='gray', linewidth=1)
-        
-        # Add p95 marker
-        ax.scatter(i, run['p95_ms'], marker='x', color='red', s=70, zorder=4)
-        
-        # Add median value label
-        ax.text(i + 0.4, median, f'{median:.2f}ms', 
-               va='center', fontsize=9)
+    # Prepare data and colors
+    names = [run['name'] for run in runs]
+    p50 = [run['p50_ms'] for run in runs]
+    p75 = [run['p75_ms'] for run in runs]
+    p25 = [run['p25_ms'] for run in runs]
+    colors = [HIGHLIGHT_COLOR if name.lower() == "utf8-zig" else DEFAULT_COLOR for name in names]
     
-    # Configure plot
-    ax.set_xticks(x_pos)
-    ax.set_xticklabels([run['name'] for run in runs])
-    ax.set_ylabel('Time (ms)')
-    ax.set_title(f'Performance Distribution: {test_name}')
-    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    # Create figure with optimal size
+    fig, ax = plt.subplots(figsize=(10, 0.8 * len(runs) + 2), dpi=100)
+    index = np.arange(len(names))
+    bar_height = 0.7
     
-    # Create legend
-    median_line = Line2D([], [], color='white', linewidth=2, label='Median (p50)')
-    p95_marker = Line2D([], [], color='red', marker='x', linestyle='None', 
-                       markersize=8, label='p95')
-    minmax_line = Line2D([], [], color='gray', linewidth=1, label='Min/Max Range')
-    iqr_box = Rectangle((0,0), 1, 1, fc=colors[0], alpha=0.7, label='IQR (p25-p75)')
-    ax.legend(handles=[median_line, p95_marker, minmax_line, iqr_box])
+    # Plot horizontal bars (fastest at top)
+    bars = ax.barh(
+        index, p50, bar_height,
+        xerr=[np.subtract(p50, p25), np.subtract(p75, p50)],
+        color=colors, ecolor=ERROR_COLOR, capsize=3, alpha=1
+    )
     
-    # Save to file instead of showing
-    safe_name = sanitize_filename(test_name)
-    filename = os.path.join(output_dir, f"{safe_name}.png")
+    # Add value labels (right-aligned)
+    max_time = max(p75)  # Used for text positioning
+    for i, (median, p95) in enumerate(zip(p50, [run['p95_ms'] for run in runs])):
+        # Position text at 105% of the IQR bar end (p75)
+        text_x = max(p75[i], p50[i]) * 1.05
+        
+        # Use different text color for highlighted bar
+        text_color = 'black' if colors[i] == HIGHLIGHT_COLOR else '#333333'
+        
+        ax.text(
+            text_x, i, 
+            f"{median:.1f} ms\np95: {p95:.1f} ms",
+            va='center', ha='left', fontsize=10,
+            linespacing=1.3, color=text_color, alpha=1
+        )
+    
+    # Configure axes
+    ax.set_yticks(index)
+    ax.set_yticklabels([textwrap.fill(name, 24) for name in names], fontsize=10)
+    ax.set_xlabel('Time (ms)', fontsize=11)
+    ax.set_title(f'Performance: {case_name}', fontsize=13, pad=15, fontweight='bold')
+    ax.invert_yaxis()  # Fastest at top
+    
+    # Set x-axis limits with headroom
+    ax.set_xlim(0, max_time * 1.3)
+    
+    # Use logarithmic scale if values span orders of magnitude
+    max_time = max(run['p95_ms'] for run in runs)
+    min_time = min(run['p25_ms'] for run in runs)
+    if max_time / min_time > 100:
+        ax.set_xscale('log')
+        ax.xaxis.set_major_formatter(ticker.FormatStrFormatter('%.1f'))
+        ax.set_xlabel('Time (ms) - Log Scale', fontsize=11)
+    
+    # Add subtle grid and clean borders
+    ax.xaxis.grid(True, linestyle='--', alpha=0.4)
+    ax.spines[['right', 'top']].set_visible(False)
+    ax.spines[['left', 'bottom']].set_color('#dddddd')
+    
     plt.tight_layout()
-    plt.savefig(filename, dpi=150)
-    plt.close(fig)  # Close the figure to free memory
     
-    print(f"Saved plot for '{test_name}' to {filename}")
-
-print(f"\nAll plots saved to {output_dir}/ directory")
+    # Save as high-quality PNG
+    filename = f"perf_{case_name.lower().replace(' ', '_')}.png"
+    plt.savefig(filename, bbox_inches='tight', dpi=120, transparent=False)
+    plt.close()
+    
+    print(f'Generated: {filename}')

@@ -1,5 +1,4 @@
 const japanese_bible = @embedFile("japanese_bible.txt");
-const utf8_test = @embedFile("UTF-8-test.txt");
 
 const Run = struct {
     name: []const u8,
@@ -105,14 +104,11 @@ pub fn main() !void {
     var tests = std.ArrayListUnmanaged(TestCase).empty;
     defer tests.deinit(gpa);
 
-    std.debug.print("\nutf8 test text: ({d} bytes)\n", .{utf8_test.len});
-    try tests.append(gpa, .{ .name = "utf8 test text", .run = &runAll(utf8_test) });
-
     std.debug.print("\njapanese bible: ({d} bytes)\n", .{japanese_bible.len});
     try tests.append(gpa, .{ .name = "japanese bible", .run = &runAll(japanese_bible) });
 
-    // 1 MB
-    var buf: [1024 * 1024]u8 = undefined;
+    // 2 MB
+    var buf: [2 * 1024 * 1024]u8 = undefined;
     var prng = std.Random.DefaultPrng.init(0xbadc0de);
     const rand = prng.random();
     {
@@ -135,7 +131,7 @@ pub fn main() !void {
         }
 
         std.debug.print("\nrandom Len 2 bytes: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random len 1 bytes", .run = &runAll(buf[0..i]) });
+        try tests.append(gpa, .{ .name = "random len 2 bytes", .run = &runAll(buf[0..i]) });
     }
     {
         var i: usize = 0;
@@ -184,7 +180,7 @@ pub fn main() !void {
 }
 
 const cases = [_]struct { *const fn ([]const u8) Spin, []const u8 }{
-    .{ mineSpin, "mine" },
+    .{ mineSpin, "utf8-zig" },
     .{ stdIteratorSpin, "std fixed" },
     .{ hoehrmannSpin, "hoehrmann" },
     .{ wellonsSpin, "wellons" },
