@@ -3,3 +3,7 @@
 zig-out/bin
 benchmark_plots
 data.json
+decoder_micro.json
+decoder_real.json
+encoder_micro.json
+encoding.py
