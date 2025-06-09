@@ -1,5 +1,7 @@
 pub const Decoder = @import("Decoder.zig");
-pub const encode = @import("encoder.zig").encodePoint;
+pub const encode = @import("encoder.zig").encode;
+pub const encodeStrict = @import("encoder.zig").encodeStrict;
+pub const encodeStrict2 = @import("encoder.zig").encodeStrict2;
 
 /// Codepoint used when {en,de}coding an invalid value
 pub const invalid_codepoint: CodePoint = 0xFFFD;
