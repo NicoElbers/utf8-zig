@@ -84,14 +84,14 @@ fn bench(
 ) void {
     const bench_step = b.step("bench", "Benchmark application");
 
-    const bench_mod = b.createModule(.{
-        .root_source_file = b.path("bench/benchmark.zig"),
+    const decoder_bench_mod = b.createModule(.{
+        .root_source_file = b.path("bench/decoder_bench.zig"),
         .target = target,
         .optimize = optimize,
     });
-    bench_mod.addImport("utf8", utf8_mod);
+    decoder_bench_mod.addImport("utf8", utf8_mod);
 
-    bench_mod.addCSourceFiles(.{
+    decoder_bench_mod.addCSourceFiles(.{
         .root = b.path("bench"),
         .files = &.{
             "hoehrmann.c",
@@ -99,9 +99,22 @@ fn bench(
         },
         .flags = &.{ "-Wall", "-Werror", "-std=c11" },
     });
-    const bench_exe = b.addExecutable(.{
-        .name = "bench",
-        .root_module = bench_mod,
+    const decoder_bench_exe = b.addExecutable(.{
+        .name = "decoder_bench",
+        .root_module = decoder_bench_mod,
     });
-    bench_step.dependOn(&b.addInstallArtifact(bench_exe, .{}).step);
+    bench_step.dependOn(&b.addInstallArtifact(decoder_bench_exe, .{}).step);
+
+    const encoder_bench_mod = b.createModule(.{
+        .root_source_file = b.path("bench/encoder_bench.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    encoder_bench_mod.addImport("utf8", utf8_mod);
+
+    const encoder_bench_exe = b.addExecutable(.{
+        .name = "encoder_bench",
+        .root_module = encoder_bench_mod,
+    });
+    bench_step.dependOn(&b.addInstallArtifact(encoder_bench_exe, .{}).step);
 }

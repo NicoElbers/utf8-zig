@@ -5,6 +5,7 @@ const Run = struct {
     data_bytes: usize,
     runs: usize,
     min_ms: f64,
+    p05_ms: f64,
     p25_ms: f64,
     p50_ms: f64,
     p75_ms: f64,
@@ -19,7 +20,10 @@ const Spin = struct {
     hash: u32,
 };
 
-const TestCase = struct { name: []const u8, run: []const Run };
+const TestCase = struct {
+    name: []const u8,
+    run: []const Run,
+};
 
 const timeout = 10;
 
@@ -34,90 +38,107 @@ const cases = [_]struct { *const fn ([]const u8) Spin, []const u8 }{
 pub fn main() !void {
     var dbg_inst = std.heap.DebugAllocator(.{}).init;
     defer _ = dbg_inst.deinit();
-    const gpa = dbg_inst.allocator();
+    var arena_inst = std.heap.ArenaAllocator.init(dbg_inst.allocator());
+    defer arena_inst.deinit();
+    const arena = arena_inst.allocator();
+
+    const args = try std.process.argsAlloc(arena);
+
+    const Type = enum { all, real, micro };
+    const typ: Type = if (args.len > 1) blk: {
+        if (std.mem.eql(u8, "micro", args[1]))
+            break :blk .micro;
+        if (std.mem.eql(u8, "real", args[1]))
+            break :blk .real;
+
+        break :blk .all;
+    } else .all;
 
     var tests = std.ArrayListUnmanaged(TestCase).empty;
-    defer tests.deinit(gpa);
 
-    std.debug.print("\njapanese bible: ({d} bytes)\n", .{japanese_bible.len});
-    try tests.append(gpa, .{ .name = "japanese bible", .run = &runAll(japanese_bible) });
-
-    // 2 MB
-    var buf: [2 * 1024 * 1024]u8 = undefined;
-    var prng = std.Random.DefaultPrng.init(0xbadc0de);
-    const rand = prng.random();
-    {
-        var i: usize = 0;
-        while (i < buf.len) {
-            const cp = randomCodePointLen1(rand);
-            @memcpy(buf[i .. i + 1], &cp);
-            i += 1;
-        }
-
-        std.debug.print("\nrandom Len 1 bytes: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random len 1 characters", .run = &runAll(&buf) });
+    if (typ == .all or typ == .real) {
+        std.debug.print("\njapanese bible: ({d} bytes)\n", .{japanese_bible.len});
+        try tests.append(arena, .{ .name = "japanese bible", .run = runAll(japanese_bible, arena) });
     }
-    {
-        var i: usize = 0;
-        while (i < buf.len - 2) {
-            const cp = randomCodePointLen2(rand);
-            @memcpy(buf[i .. i + 2], &cp);
-            i += 2;
-        }
 
-        std.debug.print("\nrandom Len 2 bytes: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random len 2 characters", .run = &runAll(buf[0..i]) });
-    }
-    {
-        var i: usize = 0;
-        while (i < buf.len - 3) {
-            const cp = randomCodePointLen3(rand);
-            @memcpy(buf[i .. i + 3], &cp);
-            i += 3;
-        }
+    if (typ == .all or typ == .micro) {
 
-        std.debug.print("\nrandom Len 3 bytes: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random len 3 characters", .run = &runAll(buf[0..i]) });
-    }
-    {
-        var i: usize = 0;
-        while (i < buf.len - 4) {
-            const cp = randomCodePointLen4(rand);
-            @memcpy(buf[i .. i + 4], &cp);
-            i += 4;
-        }
+        // 2 MB
+        var buf: [2 * 1024 * 1024]u8 = undefined;
+        var prng = std.Random.DefaultPrng.init(0xbadc0de);
+        const rand = prng.random();
+        {
+            var i: usize = 0;
+            while (i < buf.len) {
+                const cp = randomCodePointLen1(rand);
+                @memcpy(buf[i .. i + 1], &cp);
+                i += 1;
+            }
 
-        std.debug.print("\nrandom Len 4 bytes: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random len 4 characters", .run = &runAll(buf[0..i]) });
-    }
-    {
-        var i: usize = 0;
-        while (i < buf.len - 4) {
-            const len = randomCodePoint(rand, buf[i..][0..4]);
-            i += len;
+            std.debug.print("\nLen 1 characters (ASCII): ({d} bytes)\n", .{i});
+            try tests.append(arena, .{ .name = "len 1 characters (ASCII)", .run = runAll(&buf, arena) });
         }
+        {
+            var i: usize = 0;
+            while (i < buf.len - 2) {
+                const cp = randomCodePointLen2(rand);
+                @memcpy(buf[i .. i + 2], &cp);
+                i += 2;
+            }
 
-        std.debug.print("\nrandom utf8: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random UTF8 characters", .run = &runAll(buf[0..i]) });
-    }
-    {
-        var i: usize = 0;
-        while (i < buf.len - 4) {
-            const len = randomWTFCodePoint(rand, buf[i..][0..4]);
-            i += len;
+            std.debug.print("\nLen 2 characters: ({d} bytes)\n", .{i});
+            try tests.append(arena, .{ .name = "len 2 characters", .run = runAll(buf[0..i], arena) });
         }
+        {
+            var i: usize = 0;
+            while (i < buf.len - 3) {
+                const cp = randomCodePointLen3(rand);
+                @memcpy(buf[i .. i + 3], &cp);
+                i += 3;
+            }
 
-        std.debug.print("\nrandom wtf8 bytes: ({d} bytes)\n", .{i});
-        try tests.append(gpa, .{ .name = "random WTF8 characters", .run = &runAll(buf[0..i]) });
+            std.debug.print("\nLen 3 characters: ({d} bytes)\n", .{i});
+            try tests.append(arena, .{ .name = "len 3 characters", .run = runAll(buf[0..i], arena) });
+        }
+        {
+            var i: usize = 0;
+            while (i < buf.len - 4) {
+                const cp = randomCodePointLen4(rand);
+                @memcpy(buf[i .. i + 4], &cp);
+                i += 4;
+            }
+
+            std.debug.print("\nLen 4 characters: ({d} bytes)\n", .{i});
+            try tests.append(arena, .{ .name = "len 4 characters", .run = runAll(buf[0..i], arena) });
+        }
+        {
+            var i: usize = 0;
+            while (i < buf.len - 4) {
+                const len = randomCodePoint(rand, buf[i..][0..4]);
+                i += len;
+            }
+
+            std.debug.print("\nutf8: ({d} bytes)\n", .{i});
+            try tests.append(arena, .{ .name = "UTF8 characters", .run = runAll(buf[0..i], arena) });
+        }
+        {
+            var i: usize = 0;
+            while (i < buf.len - 4) {
+                const len = randomWTFCodePoint(rand, buf[i..][0..4]);
+                i += len;
+            }
+
+            std.debug.print("\nwtf8: ({d} bytes)\n", .{i});
+            try tests.append(arena, .{ .name = "WTF8 characters", .run = runAll(buf[0..i], arena) });
+        }
     }
 
     const writer = std.io.getStdOut().writer();
     try std.json.stringify(tests.items, .{}, writer);
 }
 
-fn runAll(source: []const u8) [cases.len]Run {
-    var res: [cases.len]Run = undefined;
-
+fn runAll(source: []const u8, alloc: Allocator) []Run {
+    const res = alloc.alloc(Run, cases.len) catch @panic("OOM");
     inline for (cases, 0..) |case, i| {
         res[i] = runOne(case.@"0", case.@"1", timeout, source);
     }
@@ -150,6 +171,7 @@ fn format(name: []const u8, source: []const u8, runs: []Spin) Run {
     for (runs) |r| assert(r.hash == runs[0].hash);
 
     const p00: f64 = @floatFromInt(runs[0].time_ns);
+    const p05: f64 = @floatFromInt(runs[(runs.len / 100) * 5].time_ns);
     const p25: f64 = @floatFromInt(runs[runs.len / 4].time_ns);
     const p50: f64 = @floatFromInt(runs[runs.len / 2].time_ns);
     const p75: f64 = @floatFromInt(runs[(runs.len / 4) * 3].time_ns);
@@ -164,6 +186,7 @@ fn format(name: []const u8, source: []const u8, runs: []Spin) Run {
         \\    errors: {d}
         \\    runs: {d}
         \\    min : {d: >7.3} ms; {d: >7.3} MB/s
+        \\    p05 : {d: >7.3} ms; {d: >7.3} MB/s
         \\    p25 : {d: >7.3} ms; {d: >7.3} MB/s
         \\    p50 : {d: >7.3} ms; {d: >7.3} MB/s
         \\    p75 : {d: >7.3} ms; {d: >7.3} MB/s
@@ -175,6 +198,7 @@ fn format(name: []const u8, source: []const u8, runs: []Spin) Run {
         name,                      runs[0].codepoints,
         runs[0].errors,            runs.len,
         p00 / std.time.ns_per_ms,  mb / (p00 / std.time.ns_per_s),
+        p05 / std.time.ns_per_ms,  mb / (p05 / std.time.ns_per_s),
         p25 / std.time.ns_per_ms,  mb / (p25 / std.time.ns_per_s),
         p50 / std.time.ns_per_ms,  mb / (p50 / std.time.ns_per_s),
         p75 / std.time.ns_per_ms,  mb / (p75 / std.time.ns_per_s),
@@ -187,6 +211,7 @@ fn format(name: []const u8, source: []const u8, runs: []Spin) Run {
         .name = name,
         .runs = runs.len,
         .min_ms = p00 / std.time.ns_per_ms,
+        .p05_ms = p05 / std.time.ns_per_ms,
         .p25_ms = p25 / std.time.ns_per_ms,
         .p50_ms = p50 / std.time.ns_per_ms,
         .p75_ms = p75 / std.time.ns_per_ms,
@@ -471,5 +496,5 @@ const build = @import("build");
 const assert = std.debug.assert;
 
 const Random = std.Random;
-
+const Allocator = std.mem.Allocator;
 const StdIterator = @import("StdIterator.zig");

@@ -1,3 +1,6 @@
+> **Note:** I'm planning to change a lot of this implementation when the std
+> reader writer changes happen. Do not depend on this package.
+
 # UTF8-zig
 
 A small and relatively fast UTF8 encoder and decoder library.
@@ -9,20 +12,14 @@ crashes on invalid inputs, and even then it's quite slow.
 
 ## Design goals
 
-### Decoder
-
 This implementation aims to be, in order:
 
 1. Resilient
    - After any sequence of bytes we must return to a valid state
    - No sequence of bytes may crash the program
 1. Correct
-   - According to [whatwg](https://encoding.spec.whatwg.org/#utf-8-decoder)
+   - According to [whatwg](https://encoding.spec.whatwg.org/#utf-8)
 1. Fast
-
-### Encoder
-
-TODO
 
 ## Benchmarks
 
@@ -39,15 +36,15 @@ slightly different. The `utf8-zig` implementation does the most error handling,
 so I don't think this ruins the benchmark. I should find better references, but
 that's for later.
 
-![Random utf8 characters](./images/perf_random_utf8_characters.png)
-![Random ASCII characters](./images/perf_random_len_1_characters.png)
-![Random 2 byte characters](./images/perf_random_len_2_characters.png)
-![Random 3 byte characters](./images/perf_random_len_3_characters.png)
-![Random 4 byte characters](./images/perf_random_len_4_characters.png)
+![Decoder micro benchmarks](./images/decoder_mirco_benchmark.png)
+![Decoder real world benchmarks](./images/decoder_real_benchmark.png)
 
 ### Encoder
 
-TODO
+Currently, I don't have any competition, this is a TODO. Additionally, I don't have
+any real world benchmarks, this is also a TODO.
+
+![Encoder micro benchmarks](./images/encoder_mirco_benchmark.png)
 
 ## Examples
 

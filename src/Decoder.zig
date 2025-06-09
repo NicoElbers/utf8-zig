@@ -4,6 +4,8 @@
 //!
 //! This implementation has 1 known bug wrt handling replacement of invalid
 //! characters. Read the source for info.
+//!
+//!  TODO: Once the IO update drops change this API into a source/sink
 
 source: []const u8,
 curr: usize = 0,
